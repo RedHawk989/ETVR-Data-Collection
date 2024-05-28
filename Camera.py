@@ -169,7 +169,7 @@ class Camera:
                         print(f"{Fore.YELLOW}[WARN] Frame drop. Corrupted JPEG.{Fore.RESET}")
                         return
                     if conn.in_waiting >= 32768:
-                        print(f"{Fore.CYAN}[INFO] Discarding the serial buffer ({conn.in_waiting} bytes) ignore.{Fore.RESET}")
+                    #    print(f"{Fore.CYAN}[INFO] Discarding the serial buffer ({conn.in_waiting} bytes) ignore.{Fore.RESET}")
                         conn.reset_input_buffer()
                         self.buffer = b""
 

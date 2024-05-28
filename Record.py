@@ -11,14 +11,16 @@ def main(capture_source, eye, start_time):
     cancellation_event = threading.Event()
     capture_event = threading.Event()
     camera_status_outgoing = queue.Queue()
-    camera_output_outgoing = queue.Queue(maxsize=20)
+    camera_output_outgoing = queue.Queue(maxsize=1)
 
     camera = Camera(capture_source, cancellation_event, capture_event, camera_status_outgoing, camera_output_outgoing)
     camera_thread = threading.Thread(target=camera.run)
     camera_thread.start()
 
-    filename = f"output_{eye}.avi"
-    output = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'MPEG'), 60, (240, 240))
+    filename = f"output_{eye}.mkv"  # Save as .mp4
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Use mp4v for H.264 codec
+
+    output = cv2.VideoWriter(filename, fourcc, 60, (240, 240))
 
 
     try:
@@ -30,14 +32,14 @@ def main(capture_source, eye, start_time):
                 frame = camera_output_outgoing.get()
                 image, frame_number, fps = frame
 
-                if elapsed_time >5 and elapsed_time < 65:
+                if elapsed_time >5 and elapsed_time < 66:
                     output.write(image)
                     if int(elapsed_time) > int(time_pre):
                         time_pre = int(elapsed_time)
                         print(f"{Fore.GREEN}[INFO] Frame {frame_number} sent to queue Elapsed time: {int(elapsed_time) - 5}/60 seconds")
 
 
-                if elapsed_time > 70: # wait 1 frame after video stops to fix stall bug
+                if elapsed_time > 68: # wait 10 seconds after video stops to fix stall bug
                     raise KeyboardInterrupt
 
                 cv2.imshow('Camera Frame', image)
@@ -47,12 +49,13 @@ def main(capture_source, eye, start_time):
 
     except KeyboardInterrupt:
         print("[INFO] Shutting down...")
-
-        print(f"{Fore.BLUE} Thank you for contributing <3")
+        cv2.destroyAllWindows()
+        print(f"{Fore.CYAN} Thank you for contributing <3")
         print("Make sure you DM prohurtz the .avi files generated in the path of the .exe")
+        print("[INFO] Close this window to exit the program")
         cancellation_event.set()
         camera_thread.join()
-        cv2.destroyAllWindows()
+
         time.sleep(5)
 
 if __name__ == "__main__":
