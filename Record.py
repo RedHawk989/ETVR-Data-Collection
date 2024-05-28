@@ -4,8 +4,8 @@ import cv2
 from Camera import Camera
 import time
 from colorama import Fore
-
-
+import os
+os.system("color") #fix color in terminal not working
 def main(capture_source, eye, start_time):
     time_pre = 0
     cancellation_event = threading.Event()
