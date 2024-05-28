@@ -1,8 +1,7 @@
 import threading
 import queue
-import argparse
 import cv2
-from Camera import Camera, CameraState
+from Camera import Camera
 import time
 from colorama import Fore
 
@@ -31,14 +30,14 @@ def main(capture_source, eye, start_time):
                 frame = camera_output_outgoing.get()
                 image, frame_number, fps = frame
 
-                if elapsed_time >2 and elapsed_time < 62:
+                if elapsed_time >5 and elapsed_time < 65:
                     output.write(image)
                     if int(elapsed_time) > int(time_pre):
                         time_pre = int(elapsed_time)
-                        print(f"{Fore.GREEN}[INFO] Frame {frame_number} sent to queue Elapsed time: {int(elapsed_time) - 2}/60 seconds")
+                        print(f"{Fore.GREEN}[INFO] Frame {frame_number} sent to queue Elapsed time: {int(elapsed_time) - 5}/60 seconds")
 
 
-                if elapsed_time > 63: # wait 1 frame after video stops to fix stall bug
+                if elapsed_time > 70: # wait 1 frame after video stops to fix stall bug
                     raise KeyboardInterrupt
 
                 cv2.imshow('Camera Frame', image)
@@ -49,17 +48,19 @@ def main(capture_source, eye, start_time):
     except KeyboardInterrupt:
         print("[INFO] Shutting down...")
 
-        print("DM prohurtz the .avi files")
+        print(f"{Fore.BLUE} Thank you for contributing <3")
+        print("Make sure you DM prohurtz the .avi files generated in the path of the .exe")
         cancellation_event.set()
         camera_thread.join()
         cv2.destroyAllWindows()
+        time.sleep(5)
 
 if __name__ == "__main__":
     src = input('Enter camera address then press enter. (ex COM5, 0, http://192.168.1.1) :>  ')
     eye = input('Enter if this is r for right cam and l for left cam then press enter. :>  ').lower()
-    # Record the start time
 
-    print ('Waiting for camera to warm up...')
+
+    print ('Waiting for camera to warm up for 5 seconds...')
     start_time = time.time()
     main(src, eye, start_time)
    # main("COM15", "r", start_time)
