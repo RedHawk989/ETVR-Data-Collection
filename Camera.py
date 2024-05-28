@@ -50,18 +50,17 @@ class Camera:
         self.error_message = f"{Fore.YELLOW}[WARN] Capture source {{}} not found, retrying...{Fore.RESET}"
 
     def __del__(self):
+        self.cleanup_resources()
+
+    def cleanup_resources(self):
         if self.serial_connection is not None:
             self.serial_connection.close()
+        if self.cv2_camera is not None:
+            self.cv2_camera.release()
 
     def run(self):
-
         OPENCV_PARAMS = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000]
-        while True:
-
-            if self.cancellation_event.is_set():
-                print(f"{Fore.CYAN}[INFO] Exiting Capture thread{Fore.RESET}")
-                return
-
+        while not self.cancellation_event.is_set():
             should_push = True
             if self.capture_source:
                 addr = str(self.current_capture_source)
@@ -74,20 +73,17 @@ class Camera:
                     if self.cv2_camera is None or not self.cv2_camera.isOpened() or self.camera_status == CameraState.DISCONNECTED or self.capture_source != self.current_capture_source:
                         print(self.error_message.format(self.capture_source))
                         if self.cancellation_event.wait(WAIT_TIME):
-                            return
+                            break
                         self.current_capture_source = self.capture_source
-                        self.cv2_camera = cv2.VideoCapture()
-                        self.cv2_camera.setExceptionMode(True)
-                        self.cv2_camera.open(self.current_capture_source)
+                        self.cv2_camera = cv2.VideoCapture(self.current_capture_source)
+                        self.cv2_camera.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+                        self.cv2_camera.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
                         should_push = False
 
             else:
                 if self.cancellation_event.wait(WAIT_TIME):
                     self.camera_status = CameraState.DISCONNECTED
-                    return
-
-            if should_push and not self.capture_event.wait(timeout=0.001):
-                continue
+                    break
 
             if self.capture_source:
                 addr = str(self.current_capture_source)
@@ -98,28 +94,28 @@ class Camera:
                 if not should_push:
                     self.camera_status = CameraState.CONNECTED
 
+        self.cleanup_resources()
+
     def get_cv2_camera_picture(self, should_push):
         try:
             ret, image = self.cv2_camera.read()
+            if not ret:
+                self.cv2_camera.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                raise RuntimeError("Problem while getting frame")
             height, width = image.shape[:2]
             if int(width) > 680:
                 aspect_ratio = float(width) / float(height)
                 new_height = int(680 / aspect_ratio)
                 image = cv2.resize(image, (680, new_height))
-            if not ret:
-                self.cv2_camera.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                raise RuntimeError("Problem while getting frame")
-            frame_number = self.cv2_camera.get(cv2.CAP_PROP_POS_FRAMES)
+
             current_frame_time = time.time()
             delta_time = current_frame_time - self.last_frame_time
             self.last_frame_time = current_frame_time
             if delta_time > 0:
                 self.bps = len(image) / delta_time
-            self.frame_number = self.frame_number + 1
-            self.fps = (self.fps + self.pf_fps) / 2
-            self.newft = time.time()
-            self.fps = 1 / (self.newft - self.prevft)
-            self.prevft = self.newft
+            self.frame_number += 1
+            self.fps = 1 / (current_frame_time - self.prevft)
+            self.prevft = current_frame_time
             self.fps = int(self.fps)
             if len(self.fl) < 60:
                 self.fl.append(self.fps)
@@ -128,15 +124,17 @@ class Camera:
                 self.fl.append(self.fps)
             self.fps = sum(self.fl) / len(self.fl)
             if should_push:
-                self.push_image_to_queue(image, frame_number, self.fps)
-        except:
-            print(f"{Fore.YELLOW}[WARN] Capture source problem, assuming camera disconnected, waiting for reconnect.{Fore.RESET}")
+                self.push_image_to_queue(image, self.frame_number, self.fps)
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] CV2 Capture source problem ({str(e)}), assuming camera disconnected, waiting for reconnect.{Fore.RESET}")
             self.camera_status = CameraState.DISCONNECTED
-            pass
 
     def get_next_packet_bounds(self):
+
         beg = -1
         while beg == -1:
+            if self.cancellation_event.is_set():
+                return None, None
             self.buffer += self.serial_connection.read(2048)
             beg = self.buffer.find(ETVR_HEADER + ETVR_HEADER_FRAME)
         if beg > 0:
@@ -148,12 +146,18 @@ class Camera:
 
     def get_next_jpeg_frame(self):
         beg, end = self.get_next_packet_bounds()
-        jpeg = self.buffer[beg + ETVR_HEADER_LEN : end + ETVR_HEADER_LEN]
-        self.buffer = self.buffer[end + ETVR_HEADER_LEN :]
+        if beg is None or end is None:
+            return None
+        jpeg = self.buffer[beg + ETVR_HEADER_LEN: end + ETVR_HEADER_LEN]
+        self.buffer = self.buffer[end + ETVR_HEADER_LEN:]
         return jpeg
 
     def get_serial_camera_picture(self, should_push):
+        if self.cancellation_event.is_set():
+            print(f"{Fore.CYAN}[INFO] Exiting Capture thread{Fore.RESET}")
+            return
         conn = self.serial_connection
+
         if conn is None:
             return
         try:
@@ -165,33 +169,18 @@ class Camera:
                         print(f"{Fore.YELLOW}[WARN] Frame drop. Corrupted JPEG.{Fore.RESET}")
                         return
                     if conn.in_waiting >= 32768:
-                        print(f"{Fore.CYAN}[INFO] Discarding the serial buffer ({conn.in_waiting} bytes){Fore.RESET}")
+                        print(f"{Fore.CYAN}[INFO] Discarding the serial buffer ({conn.in_waiting} bytes) ignore.{Fore.RESET}")
                         conn.reset_input_buffer()
                         self.buffer = b""
-                    current_frame_time = time.time()
-                    delta_time = current_frame_time - self.last_frame_time
-                    self.last_frame_time = current_frame_time
-                    if delta_time > 0:
-                        self.bps = len(jpeg) / delta_time
-                    self.fps = (self.fps + self.pf_fps) / 2
-                    self.newft = time.time()
-                    self.fps = 1 / (self.newft - self.prevft)
-                    self.prevft = self.newft
-                    self.fps = int(self.fps)
-                    if len(self.fl) < 60:
-                        self.fl.append(self.fps)
-                    else:
-                        self.fl.pop(0)
-                        self.fl.append(self.fps)
-                    self.fps = sum(self.fl) / len(self.fl)
-                    self.frame_number = self.frame_number + 1
+
+                    self.frame_number += 1
+
                     if should_push:
                         self.push_image_to_queue(image, self.frame_number, self.fps)
-        except Exception:
-            print(f"{Fore.YELLOW}[WARN] Serial capture source problem, assuming camera disconnected, waiting for reconnect.{Fore.RESET}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] Serial capture source problem ({str(e)}), assuming camera disconnected, waiting for reconnect.{Fore.RESET}")
             conn.close()
             self.camera_status = CameraState.DISCONNECTED
-            pass
 
     def start_serial_connection(self, port):
         if self.serial_connection is not None and self.serial_connection.is_open:
@@ -210,13 +199,13 @@ class Camera:
             print(f"{Fore.CYAN}[INFO] ETVR Serial Tracker device connected on {port}{Fore.RESET}")
             self.serial_connection = conn
             self.camera_status = CameraState.CONNECTED
-        except Exception:
-            print(f"{Fore.CYAN}[INFO] Failed to connect on {port}{Fore.RESET}")
+        except Exception as e:
+            print(f"{Fore.CYAN}[INFO] Failed to connect on {port} ({str(e)}){Fore.RESET}")
             self.camera_status = CameraState.DISCONNECTED
 
     def push_image_to_queue(self, image, frame_number, fps):
-        qsize = self.camera_output_outgoing.qsize()
-        if qsize > 1:
-            print(f"{Fore.YELLOW}[WARN] CAPTURE QUEUE BACKPRESSURE OF {qsize}. CHECK FOR CRASH OR TIMING ISSUES IN ALGORITHM.{Fore.RESET}")
+        if self.cancellation_event.is_set():
+            print(f"{Fore.CYAN}[INFO] Exiting Capture thread{Fore.RESET}")
+            return
         self.camera_output_outgoing.put((image, frame_number, fps))
         self.capture_event.clear()
