@@ -17,8 +17,8 @@ def main(capture_source, eye, start_time):
     camera_thread = threading.Thread(target=camera.run)
     camera_thread.start()
 
-    filename = f"output_{eye}.mkv"  # Save as .mp4
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Use mp4v for H.264 codec
+    filename = f"output_{eye}.avi"  # Save as .mp4
+    fourcc = cv2.VideoWriter_fourcc(*'DIVX')  # Use mp4v for H.264 codec
 
     output = cv2.VideoWriter(filename, fourcc, 60, (240, 240))
 
