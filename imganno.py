@@ -111,6 +111,7 @@ else:
 print('\n \nKeybinds:')
 print("Press 'r' to clear the keypoints.")
 print("Press 'w' to save the keypoints and move to the next image.")
+print("Press 'q' to place the keypoints from the previous image to the current image \n")
 print("Press 'y' to close the program \n")
 
 print("Mouse Buttons:")
@@ -187,6 +188,13 @@ while image_index < len(image_files):
         if key == ord("y"):
             print("[INFO] CLOSING")
             exit()
+
+        if key == ord("q"):
+            if len(keypoints_history) > 0:
+                image_points = keypoints_history[-1].copy()  # Copy the last set of keypoints from history
+                print("[INFO] Placed keypoints from history")
+
+
 
 
 
