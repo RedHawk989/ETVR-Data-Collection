@@ -9,22 +9,28 @@ def read_data_file(file_path):
     for line in lines:
         parts = line.strip().split()
         coords = list(map(int, parts[:-1]))
+     #   print(parts)
         image_name = parts[-1]
         data.append((coords, image_name))
     return data
 
 
+import cv2
+
 def draw_points(image, points):
     for i in range(0, len(points), 2):
         x = points[i]
         y = points[i + 1]
-        cv2.circle(image, (x, y), 5, (0, 255, 0), -1)
+        point_number = i // 2  # Calculate the point number
+        cv2.circle(image, (x, y), 2, (0, 255, 0), -1)
+        cv2.putText(image, str(point_number), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
     return image
+
 
 
 def main():
     # Get the input file path from the user
-    file_path = input("Enter the path to the .txt file: ")
+    file_path = "points.txt"  #input("Enter the path to the .txt file: ")
     data = read_data_file(file_path)
 
     # Set the path to the folder containing images
