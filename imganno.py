@@ -1,13 +1,15 @@
 import cv2
 import glob
 import os
-import time
 import sys
+import collections
 
 # Constants
 MAX_POINTS = 7
 KEYPOINT_COLOR = (255, 255, 0)
-KEYPOINT_ALPHA = 0.30 # Transparency value (0.0 - fully transparent, 1.0 - fully opaque)
+KEYPOINT_ALPHA = 0.30  # Transparency value (0.0 - fully transparent, 1.0 - fully opaque)
+SIMILARITY_LOOKBACK_COUNT = 10  # Number of previous good frames to check similarity to
+SIMILARITY_THRESHOLD = 0.99
 last_annotated_index_path = "last_annotated_index.txt"
 # Variables
 image_points = []
@@ -30,6 +32,7 @@ def mouse_callback(event, x, y, flags, param):
             closest_point_index = distances.index(min(distances))
             image_points[closest_point_index] = (image_points[closest_point_index][0], x, y)
 
+
 def load_last_annotated_index(file_path):
     try:
         with open(file_path, "r") as file:
@@ -37,22 +40,19 @@ def load_last_annotated_index(file_path):
     except FileNotFoundError:
         return 0
 
+
 # Function to save the last annotated frame index to a file
 def save_last_annotated_index(file_path, index):
     with open(file_path, "w") as file:
         file.write(str(index))
 
 
-import os
-import cv2
-
-
 def extract_frames(video_path, output_folder):
-    # Get the base name of the video file without the extension
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    # # Get the base name of the video file without the extension
+    # base_name = os.path.splitext(os.path.basename(video_path))[0]
 
     # Create the output folder if it doesn't exist
-   # output_folder = base_name + '_frames'
+    # output_folder = base_name + '_frames'
     os.makedirs(output_folder, exist_ok=True)
 
     # Open the video file
@@ -69,18 +69,28 @@ def extract_frames(video_path, output_folder):
     print(f"Extracting {frame_count} frames from {video_path} at {fps} FPS")
 
     frame_number = 0
+    frame_good = 0
+    frame_deque = collections.deque(maxlen=SIMILARITY_LOOKBACK_COUNT)
     while True:
         try:
             ret, frame = cap.read()
             if not ret:
-                print(f"Finished extracting frames. Total frames extracted: {frame_number}")
+                print(f"Finished extracting frames. Total frames extracted: {frame_number}, out of which {frame_good} are saved.")
                 break
 
-            # Save the frame as a JPEG file
-            frame_path = os.path.join(output_folder, f"{video_path}_frame_{frame_number:04d}.jpeg")
-            cv2.imwrite(frame_path, frame)
-
-            print(f"Saved frame {frame_number}")
+            is_frame_good = True
+            for frame_number_template, frame_template in frame_deque:
+                if cv2.matchTemplate(frame, frame_template, cv2.TM_CCOEFF_NORMED).max() >= SIMILARITY_THRESHOLD:
+                    print(f"Frame {frame_number} is too similar to {frame_number_template}, dropping..")
+                    is_frame_good = False
+                    break
+            if is_frame_good or len(frame_deque) == 0:
+                # Save the frame as a JPEG file
+                frame_path = os.path.join(output_folder, f"{video_path}_frame_{frame_number:04d}.jpeg")
+                cv2.imwrite(frame_path, frame)
+                frame_deque.append((frame_number, frame))
+                frame_good += 1
+                print(f"Saved frame {frame_number}")
 
             frame_number += 1
 
@@ -95,12 +105,13 @@ def extract_frames(video_path, output_folder):
 
 
 video_path = input("Give the name of the video you would like to annotate :> ")
-output_folder = "output_frames" #input("What would you like to name the output folder, or what is the name of the folder of pre extracted frames :> ")
+output_folder = "output_frames"  # input("What would you like to name the output folder, or what is the name of the folder of pre extracted frames :> ")
 
-resume_status = input("Resume annotations where you left off? Y/N? (if you are doing a new video type N, this will not work properly if new files have been added) :> ")
+resume_status = input(
+    "Resume annotations where you left off? Y/N? (if you are doing a new video type N, this will not work properly if new files have been added) :> "
+)
 resume_status = resume_status.lower()
 if resume_status == "y":
-   
     image_index = load_last_annotated_index(last_annotated_index_path)
     print("resuming")
 
@@ -108,7 +119,7 @@ else:
     extract_frames(video_path, output_folder)
 
 
-print('\n \nKeybinds:')
+print("\n \nKeybinds:")
 print("Press 'r' to clear the keypoints.")
 print("Press 'w' to save the keypoints and move to the next image.")
 print("Press 'q' to place the keypoints from the previous image to the current image \n")
@@ -119,10 +130,7 @@ print("Left click to draw keypoints.")
 print("Right click to adjust point nearest to cursor to cursor position. \n \n")
 
 
-
-
-
-image_folder = output_folder # path with .jpg images
+image_folder = output_folder  # path with .jpg images
 image_files = glob.glob(image_folder + "/*.jpeg")
 
 cv2.namedWindow("Image")
@@ -151,8 +159,9 @@ while image_index < len(image_files):
             original_point = (int(point[1]), int(point[2]))
 
             cv2.circle(display_image, original_point, 4, (0, 255, 0), -1)
-            cv2.putText(display_image, str(i + 1), (original_point[0], original_point[1] + 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(
+                display_image, str(i + 1), (original_point[0], original_point[1] + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
+            )
 
         cv2.imshow("Image", display_image)
         key = cv2.waitKey(1) & 0xFF
@@ -170,15 +179,14 @@ while image_index < len(image_files):
                 point_string = ",".join([f"{int(point[1] / scale_factor)},{int(point[2] / scale_factor)}" for point in sorted_points])
                 point_string = point_string.replace(",", " ")
 
-                point_string = f'{point_string} {filen}'
-                print(f'[INFO] SAVED DATA FOR FRAME {filen}')
+                point_string = f"{point_string} {filen}"
+                print(f"[INFO] SAVED DATA FOR FRAME {filen}")
                 file_path = "points.txt"  # Replace with path of existing file to save keypoint data to
                 with open(file_path, "a") as file:
                     file.write(point_string + "\n")
             else:
-                print(f'[INFO] SKIPPED FRAME {filen}')
+                print(f"[INFO] SKIPPED FRAME {filen}")
             break
-
 
         if key == ord("r"):
             print("[INFO] CLEARED KEYPOINTS")
@@ -194,11 +202,6 @@ while image_index < len(image_files):
                 image_points = keypoints_history[-1].copy()  # Copy the last set of keypoints from history
                 print("[INFO] Placed keypoints from history")
 
-
-
-
-
-
     # Reset points for the next image
     image_points = []
 
@@ -207,22 +210,3 @@ while image_index < len(image_files):
     save_last_annotated_index(last_annotated_index_path, image_index)
 
 cv2.destroyAllWindows()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
