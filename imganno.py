@@ -220,7 +220,7 @@ while image_index < len(image_files):
                 # Print image points
                 point_string = ",".join(
                     [
-                        f"{min(int(point[1] / scale_factor), image.shape[1])},{min(int(point[2] / scale_factor), image.shape[0])}"
+                        f"{min(int(point[1] / scale_factor), image.shape[1]-1)},{min(int(point[2] / scale_factor), image.shape[0]-1)}"
                         for point in sorted_points
                     ]
                 )
