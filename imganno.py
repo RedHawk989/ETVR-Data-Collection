@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 import glob
 import os
 import sys
@@ -10,6 +11,15 @@ KEYPOINT_COLOR = (255, 255, 0)
 KEYPOINT_ALPHA = 0.30  # Transparency value (0.0 - fully transparent, 1.0 - fully opaque)
 SIMILARITY_LOOKBACK_COUNT = 10  # Number of previous good frames to check similarity to
 SIMILARITY_THRESHOLD = 0.99
+POINT_HELP_TEXT = [
+    "left eyelid corner",
+    "upper left eyelid",
+    "upper right eyelid",
+    "right eyelid corner",
+    "lower right eyelid",
+    "lower left eyelid",
+    "pupil center",
+]
 last_annotated_index_path = "last_annotated_index.txt"
 # Variables
 image_points = []
@@ -141,8 +151,12 @@ scale_factor = 2  # Set the desired scale factor
 while image_index < len(image_files):
     # Load image
     print(image_index)
+    directory_path = os.path.dirname(image_files[image_index])
+    file_name = image_files[image_index].replace(directory_path + os.path.sep, "")
     image = cv2.imread(image_files[image_index])
 
+    image_points = []
+    point_id = 0
     for keypoints in keypoints_history:
         for point in keypoints:
             overlay = image.copy()
@@ -153,6 +167,34 @@ while image_index < len(image_files):
 
     while True:
         display_image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor)  # Scale the image
+        # Point hint when putting down points
+        if point_id < MAX_POINTS:
+            cv2.putText(
+                display_image,
+                f"put down {point_id+1}: {POINT_HELP_TEXT[point_id]}",
+                (5, 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+            )
+
+        # Keyboard shortcuts as footer
+        text_footer = np.zeros((np.uint8(0.04 * display_image.shape[1]), display_image.shape[0], 3), np.uint8)
+        cv2.putText(
+            text_footer,
+            "r - clear | w - save | q - copy from prev | y - quit",
+            (
+                np.uint8(0.01 * display_image.shape[0]),
+                np.uint8(text_footer.shape[0] / 2 + 0.009 * display_image.shape[1]),
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (229, 229, 229),
+            1,
+        )
+
+        display_image = cv2.vconcat([display_image, text_footer])
 
         for i, point in enumerate(image_points):
             # Scale the points back to the original image size
@@ -164,28 +206,33 @@ while image_index < len(image_files):
             )
 
         cv2.imshow("Image", display_image)
+        cv2.setWindowTitle("Image", f"Current image: {file_name}")
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("w"):
             directory_path = os.path.dirname(image_files[image_index])
-            file_name = os.path.basename(image_files[image_index])
-            filen = image_files[image_index].replace(directory_path + os.path.sep, "")
+            file_name = image_files[image_index].replace(directory_path + os.path.sep, "")
 
             if len(image_points) == MAX_POINTS:
                 keypoints_history = [image_points.copy()]
                 sorted_points = sorted(image_points, key=lambda x: x[0])
 
                 # Print image points
-                point_string = ",".join([f"{int(point[1] / scale_factor)},{int(point[2] / scale_factor)}" for point in sorted_points])
+                point_string = ",".join(
+                    [
+                        f"{min(int(point[1] / scale_factor), image.shape[1])},{min(int(point[2] / scale_factor), image.shape[0])}"
+                        for point in sorted_points
+                    ]
+                )
                 point_string = point_string.replace(",", " ")
 
-                point_string = f"{point_string} {filen}"
-                print(f"[INFO] SAVED DATA FOR FRAME {filen}")
+                point_string = f"{point_string} {file_name}"
+                print(f"[INFO] SAVED DATA FOR FRAME {file_name}")
                 file_path = "points.txt"  # Replace with path of existing file to save keypoint data to
                 with open(file_path, "a") as file:
                     file.write(point_string + "\n")
             else:
-                print(f"[INFO] SKIPPED FRAME {filen}")
+                print(f"[INFO] SKIPPED FRAME {file_name}")
             break
 
         if key == ord("r"):
@@ -200,6 +247,7 @@ while image_index < len(image_files):
         if key == ord("q"):
             if len(keypoints_history) > 0:
                 image_points = keypoints_history[-1].copy()  # Copy the last set of keypoints from history
+                point_id = MAX_POINTS
                 print("[INFO] Placed keypoints from history")
 
     # Reset points for the next image
