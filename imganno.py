@@ -4,6 +4,7 @@ import glob
 import os
 import sys
 import collections
+import re
 
 # Constants
 MAX_POINTS = 7
@@ -21,6 +22,7 @@ POINT_HELP_TEXT = [
     "pupil center",
 ]
 last_annotated_index_path = "last_annotated_index.txt"
+points_path = "points.txt"  # Replace with path of existing file to save keypoint data to
 # Variables
 image_points = []
 image_index = 0
@@ -132,7 +134,8 @@ else:
 print("\n \nKeybinds:")
 print("Press 'r' to clear the keypoints.")
 print("Press 'w' to save the keypoints and move to the next image.")
-print("Press 'q' to place the keypoints from the previous image to the current image \n")
+print("Press 's' to save the keypoints and move to the previous image.")
+print("Press 'q' to place the shadow keypoints to the current image \n")
 print("Press 'y' to close the program \n")
 
 print("Mouse Buttons:")
@@ -148,15 +151,30 @@ cv2.setMouseCallback("Image", mouse_callback)
 
 scale_factor = 2  # Set the desired scale factor
 
-while image_index < len(image_files):
+while True:
+    # Init
+    image_points = []
+    point_id = 0
+
     # Load image
-    print(image_index)
     directory_path = os.path.dirname(image_files[image_index])
     file_name = image_files[image_index].replace(directory_path + os.path.sep, "")
     image = cv2.imread(image_files[image_index])
+    print(f"Annotating {file_name}")
 
-    image_points = []
-    point_id = 0
+    # Load image points
+    line = None
+    with open(points_path, "r") as file:
+        line = re.search(f"(^|\n).*{file_name}.*", file.read())
+    if line:
+        parts = line[0].strip().split()
+        coords = list(map(int, parts[:-1]))
+        for i in range(0, len(coords), 2):
+            x = coords[i] * scale_factor
+            y = coords[i + 1] * scale_factor
+            image_points.append((point_id, x, y))
+            point_id += 1
+
     for keypoints in keypoints_history:
         for point in keypoints:
             overlay = image.copy()
@@ -183,7 +201,7 @@ while image_index < len(image_files):
         text_footer = np.zeros((np.uint8(0.04 * display_image.shape[1]), display_image.shape[0], 3), np.uint8)
         cv2.putText(
             text_footer,
-            "r - clear | w - save | q - copy from prev | y - quit",
+            "r - clear | w - next | s - prev | q - copy KPs | y - quit",
             (
                 np.uint8(0.01 * display_image.shape[0]),
                 np.uint8(text_footer.shape[0] / 2 + 0.009 * display_image.shape[1]),
@@ -209,10 +227,7 @@ while image_index < len(image_files):
         cv2.setWindowTitle("Image", f"Current image: {file_name}")
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord("w"):
-            directory_path = os.path.dirname(image_files[image_index])
-            file_name = image_files[image_index].replace(directory_path + os.path.sep, "")
-
+        if key == ord("w") or key == ord("s"):
             if len(image_points) == MAX_POINTS:
                 keypoints_history = [image_points.copy()]
                 sorted_points = sorted(image_points, key=lambda x: x[0])
@@ -227,13 +242,29 @@ while image_index < len(image_files):
                 point_string = point_string.replace(",", " ")
 
                 point_string = f"{point_string} {file_name}"
-                print(f"[INFO] SAVED DATA FOR FRAME {file_name}")
-                file_path = "points.txt"  # Replace with path of existing file to save keypoint data to
-                with open(file_path, "a") as file:
+                with open(points_path, "r") as file:
+                    file_content = file.read()
+                    line = re.search(f"(^|\n).*{file_name}.*", file_content)
+                if line:
+                    with open(points_path, "w") as file:
+                        file.write(re.sub(f"(^|\n).*{file_name}.*", "", file_content))
+                with open(points_path, "a") as file:
                     file.write(point_string + "\n")
+                print(f"[INFO] SAVED DATA FOR FRAME {file_name}")
+
             else:
                 print(f"[INFO] SKIPPED FRAME {file_name}")
-            break
+
+            save_last_annotated_index(last_annotated_index_path, image_index)
+
+            if key == ord("w"):
+                # Move to the next image
+                image_index += 1
+                break
+            elif key == ord("s"):
+                # Move to previous image
+                image_index -= 1
+                break
 
         if key == ord("r"):
             print("[INFO] CLEARED KEYPOINTS")
@@ -250,11 +281,5 @@ while image_index < len(image_files):
                 point_id = MAX_POINTS
                 print("[INFO] Placed keypoints from history")
 
-    # Reset points for the next image
-    image_points = []
-
-    # Move to the next image
-    image_index += 1
-    save_last_annotated_index(last_annotated_index_path, image_index)
 
 cv2.destroyAllWindows()
