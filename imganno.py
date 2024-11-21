@@ -310,7 +310,7 @@ while True:
             elif key == ord("s"):
                 # Move to previous image
                 image_index -= 1
-                image_index = image_index if image_index > 0 else len(image_files) - 1
+                image_index = image_index if image_index >= 0 else len(image_files) - 1
                 break
 
         if key == ord("r"):
