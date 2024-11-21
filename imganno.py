@@ -23,19 +23,35 @@ POINT_HELP_TEXT = [
 ]
 last_annotated_index_path = "last_annotated_index.txt"
 points_path = "points.txt"  # Replace with path of existing file to save keypoint data to
-# Variables
+
+# General variables
+original_points = []
 image_points = []
 image_index = 0
 keypoints_history = []
 point_id = 0
 
+# Rotation-related variable
+scale_factor = 2  # Set the desired scale factor
+rotation_degrees = 0
+rotation_increment = 15
+rotation_matrix = np.asarray([[1, 0, 0], [0, 1, 0]])
+rotation_matrix_inv = np.asarray([[1, 0, 0], [0, 1, 0]])
+
 
 def mouse_callback(event, x, y, flags, param):
-    global image_points, point_id
+    global original_points, image_points, point_id, rotation_matrix_inv
 
     if event == cv2.EVENT_LBUTTONDOWN:
         if len(image_points) < MAX_POINTS:
             image_points.append((point_id, x, y))
+
+            # Points in its non-rotated coordinates
+            original_point = np.asarray([x, y])
+            new_point = cv2.transform(original_point.reshape((-1, 1, 2)), rotation_matrix_inv)
+            new_point = np.uint16(new_point[0][0])
+            original_points.append((point_id, new_point[0], new_point[1]))
+
             point_id += 1
 
     elif event == cv2.EVENT_RBUTTONDOWN:
@@ -43,6 +59,12 @@ def mouse_callback(event, x, y, flags, param):
             distances = [((p[1] - x) ** 2 + (p[2] - y) ** 2) for p in image_points]
             closest_point_index = distances.index(min(distances))
             image_points[closest_point_index] = (image_points[closest_point_index][0], x, y)
+
+            # Points in its non-rotated coordinates
+            original_point = np.asarray([x, y])
+            new_point = cv2.transform(original_point.reshape((-1, 1, 2)), rotation_matrix_inv)
+            new_point = np.uint16(new_point[0][0])
+            original_points[closest_point_index] = (image_points[closest_point_index][0], new_point[0], new_point[1])
 
 
 def load_last_annotated_index(file_path):
@@ -136,6 +158,8 @@ print("Press 'r' to clear the keypoints.")
 print("Press 'w' to save the keypoints and move to the next image.")
 print("Press 's' to save the keypoints and move to the previous image.")
 print("Press 'q' to place the shadow keypoints to the current image \n")
+print("Press 'd' to rotate image clockwise")
+print("Press 'a' to rotate image counter-clockwise\n")
 print("Press 'y' to close the program \n")
 
 print("Mouse Buttons:")
@@ -149,11 +173,11 @@ image_files = glob.glob(image_folder + "/*.jpeg")
 cv2.namedWindow("Image")
 cv2.setMouseCallback("Image", mouse_callback)
 
-scale_factor = 2  # Set the desired scale factor
 
 while True:
     # Init
     image_points = []
+    original_points = []
     point_id = 0
 
     # Load image
@@ -172,9 +196,15 @@ while True:
         for i in range(0, len(coords), 2):
             x = coords[i] * scale_factor
             y = coords[i + 1] * scale_factor
-            image_points.append((point_id, x, y))
+            original_points.append((point_id, x, y))
+
+            original_point = np.asarray([x, y])
+            new_point = cv2.transform(original_point.reshape((-1, 1, 2)), rotation_matrix)
+            new_point = np.uint16(new_point[0][0])
+            image_points.append((point_id, new_point[0], new_point[1]))
             point_id += 1
 
+    # Draw keypoints history on original image
     for keypoints in keypoints_history:
         for point in keypoints:
             overlay = image.copy()
@@ -184,7 +214,15 @@ while True:
             image = cv2.addWeighted(overlay, KEYPOINT_ALPHA, image, 1 - KEYPOINT_ALPHA, 0)
 
     while True:
-        display_image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor)  # Scale the image
+        # Scale the image
+        display_image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor)
+
+        # Rotate image
+        image_center = (display_image.shape[1] // 2, display_image.shape[0] // 2)
+        rotation_matrix = cv2.getRotationMatrix2D(image_center, rotation_degrees, 1)
+        rotation_matrix_inv = cv2.getRotationMatrix2D(image_center, -rotation_degrees, 1)
+        display_image = cv2.warpAffine(display_image, rotation_matrix, display_image.shape[0:-1])
+
         # Point hint when putting down points
         if point_id < MAX_POINTS:
             cv2.putText(
@@ -211,16 +249,20 @@ while True:
             (229, 229, 229),
             1,
         )
-
         display_image = cv2.vconcat([display_image, text_footer])
 
+        # Draw image annotations
         for i, point in enumerate(image_points):
-            # Scale the points back to the original image size
-            original_point = (int(point[1]), int(point[2]))
-
-            cv2.circle(display_image, original_point, 4, (0, 255, 0), -1)
+            draw_point = (point[1], point[2])
+            cv2.circle(display_image, draw_point, 4, (0, 255, 0), -1)
             cv2.putText(
-                display_image, str(i + 1), (original_point[0], original_point[1] + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
+                display_image,
+                str(i + 1),
+                (draw_point[0], draw_point[1] + 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
             )
 
         cv2.imshow("Image", display_image)
@@ -229,8 +271,8 @@ while True:
 
         if key == ord("w") or key == ord("s"):
             if len(image_points) == MAX_POINTS:
-                keypoints_history = [image_points.copy()]
-                sorted_points = sorted(image_points, key=lambda x: x[0])
+                keypoints_history = [original_points.copy()]
+                sorted_points = sorted(original_points, key=lambda x: x[0])
 
                 # Print image points
                 point_string = ",".join(
@@ -260,10 +302,12 @@ while True:
             if key == ord("w"):
                 # Move to the next image
                 image_index += 1
+                image_index = image_index if image_index < len(image_files) else 0
                 break
             elif key == ord("s"):
                 # Move to previous image
                 image_index -= 1
+                image_index = image_index if image_index > 0 else len(image_files) - 1
                 break
 
         if key == ord("r"):
@@ -275,9 +319,36 @@ while True:
             print("[INFO] CLOSING")
             exit()
 
+        if key == ord("a") or key == ord("d"):
+            if key == ord("a"):
+                rotation_degrees += rotation_increment
+            elif key == ord("d"):
+                rotation_degrees -= rotation_increment
+            # Clamp to 0..359
+            rotation_degrees = rotation_degrees if rotation_degrees >= 0 else 360 + rotation_degrees
+            rotation_degrees = rotation_degrees if rotation_degrees < 360 else rotation_degrees - 360
+            print(f"Rotation: {rotation_degrees}")
+            rotation_matrix = cv2.getRotationMatrix2D(image_center, rotation_degrees, 1)
+            rotation_matrix_inv = cv2.getRotationMatrix2D(image_center, -rotation_degrees, 1)
+            new_points = []
+            for point in original_points:
+                original_point = np.asarray([point[1], point[2]])
+                new_point = cv2.transform(original_point.reshape((-1, 1, 2)), rotation_matrix)
+                new_point = np.uint16(new_point[0][0])
+                new_points.append((point[0], new_point[0], new_point[1]))
+            image_points = new_points
+            new_points = []
+
         if key == ord("q"):
             if len(keypoints_history) > 0:
-                image_points = keypoints_history[-1].copy()  # Copy the last set of keypoints from history
+                original_points = keypoints_history[-1].copy()  # Copy the last set of keypoints from history
+                new_points = []
+                for point in original_points:
+                    original_point = np.asarray([point[1], point[2]])
+                    new_point = cv2.transform(original_point.reshape((-1, 1, 2)), rotation_matrix)
+                    new_point = np.uint16(new_point[0][0])
+                    new_points.append((point[0], new_point[0], new_point[1]))
+                image_points = new_points
                 point_id = MAX_POINTS
                 print("[INFO] Placed keypoints from history")
 
