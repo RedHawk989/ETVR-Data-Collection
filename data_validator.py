@@ -3,19 +3,23 @@ import os
 
 
 def read_data_file(file_path):
-    with open(file_path, 'r') as file:
+    with open(file_path, "r") as file:
         lines = file.readlines()
     data = []
     for line in lines:
         parts = line.strip().split()
+        if len(parts) < 8:
+            print("Bad data")
+            continue
         coords = list(map(int, parts[:-1]))
-     #   print(parts)
-        image_name = parts[-1]
+        try:
+            image_name = parts[-1]
+        except IndexError:
+            print("Bad data")
+            continue
         data.append((coords, image_name))
     return data
 
-
-import cv2
 
 def draw_points(image, points):
     for i in range(0, len(points), 2):
@@ -27,14 +31,16 @@ def draw_points(image, points):
     return image
 
 
-
 def main():
     # Get the input file path from the user
-    file_path = "points.txt"  #input("Enter the path to the .txt file: ")
+    file_path = "points.txt"  # input("Enter the path to the .txt file: ")
     data = read_data_file(file_path)
+    if len(data) == 0:
+        print("No data to review")
+        quit()
 
     # Set the path to the folder containing images
-    image_folder = 'output_frames'
+    image_folder = "output_frames"
 
     index = 0
     while True:
@@ -49,10 +55,10 @@ def main():
 
         image_with_points = draw_points(image, coords)
 
-        cv2.imshow('Image with Points', image_with_points)
+        cv2.imshow("Image with Points", image_with_points)
         key = cv2.waitKey(0)
 
-        if key == ord('q'):
+        if key == ord("q"):
             break
         else:
             index = (index + 1) % len(data)
