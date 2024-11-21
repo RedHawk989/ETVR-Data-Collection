@@ -113,18 +113,21 @@ def extract_frames(video_path, output_folder):
                 break
 
             is_frame_good = True
+            filename = f"{video_path}_frame_{frame_number:04d}.jpeg"
+            frame_path = os.path.join(output_folder, filename)
+            # Save the frame as a JPEG file
+            cv2.imwrite(frame_path, frame)
+            print(f"Saved frame {frame_number}")
             for frame_number_template, frame_template in frame_deque:
                 if cv2.matchTemplate(frame, frame_template, cv2.TM_CCOEFF_NORMED).max() >= SIMILARITY_THRESHOLD:
-                    print(f"Frame {frame_number} is too similar to {frame_number_template}, dropping..")
+                    print(f"Frame is too similar to {frame_number_template}, excluding to annotate..")
                     is_frame_good = False
                     break
             if is_frame_good or len(frame_deque) == 0:
-                # Save the frame as a JPEG file
-                frame_path = os.path.join(output_folder, f"{video_path}_frame_{frame_number:04d}.jpeg")
-                cv2.imwrite(frame_path, frame)
                 frame_deque.append((frame_number, frame))
+                with open(f"{output_folder}/good_images_list.txt", "a") as file:
+                    file.write(f"{filename}\n")
                 frame_good += 1
-                print(f"Saved frame {frame_number}")
 
             frame_number += 1
 
@@ -168,7 +171,26 @@ print("Right click to adjust point nearest to cursor to cursor position. \n \n")
 
 
 image_folder = output_folder  # path with .jpg images
-image_files = glob.glob(image_folder + "/*.jpeg")
+# image_files = glob.glob(image_folder + "/*.jpeg")
+image_files = []
+try:
+    with open(f"{output_folder}/good_images_list.txt", "r") as file:
+        lines = file.readlines()
+except FileNotFoundError:
+    print("No good images found! Press enter to exit..")
+    input()
+    exit()
+else:
+    for line in lines:
+        image_file = f"{image_folder}/{line.strip()}"
+        if len(image_file) < len(image_folder):
+            continue
+        else:
+            image_files.append(image_file)
+if len(image_files) == 0:
+    print("No good images found! Press enter to exit..")
+    input()
+    exit()
 
 cv2.namedWindow("Image")
 cv2.setMouseCallback("Image", mouse_callback)
