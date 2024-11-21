@@ -188,8 +188,11 @@ while True:
 
     # Load image points
     line = None
-    with open(points_path, "r") as file:
-        line = re.search(f"(^|\n).*{file_name}.*", file.read())
+    try:
+        with open(points_path, "r") as file:
+            line = re.search(f"(^|\n).*{file_name}.*", file.read())
+    except FileNotFoundError:
+        open(points_path, "a").close()
     if line:
         parts = line[0].strip().split()
         coords = list(map(int, parts[:-1]))
