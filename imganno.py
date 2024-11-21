@@ -257,7 +257,7 @@ while True:
         # Draw image annotations
         for i, point in enumerate(image_points):
             draw_point = (point[1], point[2])
-            cv2.circle(display_image, draw_point, 4, (0, 255, 0), -1)
+            cv2.circle(display_image, draw_point, 4, (0, 255, 0) if i < 6 else (0, 0, 255), -1)
             cv2.putText(
                 display_image,
                 str(i + 1),
