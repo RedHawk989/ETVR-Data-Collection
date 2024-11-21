@@ -125,7 +125,7 @@ def extract_frames(video_path, output_folder):
                     break
             if is_frame_good or len(frame_deque) == 0:
                 frame_deque.append((frame_number, frame))
-                with open(f"{output_folder}/good_images_list.txt", "a") as file:
+                with open(f"{output_folder}{os.path.sep}good_images_list.txt", "a") as file:
                     file.write(f"{filename}\n")
                 frame_good += 1
 
@@ -174,7 +174,7 @@ image_folder = output_folder  # path with .jpg images
 # image_files = glob.glob(image_folder + "/*.jpeg")
 image_files = []
 try:
-    with open(f"{output_folder}/good_images_list.txt", "r") as file:
+    with open(f"{output_folder}{os.path.sep}good_images_list.txt", "r") as file:
         lines = file.readlines()
 except FileNotFoundError:
     print("No good images found! Press enter to exit..")
@@ -182,7 +182,7 @@ except FileNotFoundError:
     exit()
 else:
     for line in lines:
-        image_file = f"{image_folder}/{line.strip()}"
+        image_file = f"{image_folder}{os.path.sep}{line.strip()}"
         if len(image_file) < len(image_folder):
             continue
         else:
