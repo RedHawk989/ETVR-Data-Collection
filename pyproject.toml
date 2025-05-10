@@ -7,7 +7,7 @@ authors = ["RedHawk989 <48768484+RedHawk989@users.noreply.github.com>"]
 license = "GPL v3"
 repository = "https://github.com/RedHawk989/ETVR-Data-Collection"
 [tool.poetry.dependencies]
-python = ">=3.12.0,<3.13"
+python = ">=3.13.0,<3.14"
 python-osc = "^1.8.1"
 opencv-python = "^4.8.0.74"
 numpy = "^1.23.5"
@@ -18,7 +18,7 @@ colorama = "^0.4.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest-asyncio = "^0.21.1"
-pyinstaller = "^5.6.2"
+pyinstaller = ">=6.13.0"
 viztracer = "^0.15.6"
 black = "^22.10.0"
 pytest = "^7.2.0"

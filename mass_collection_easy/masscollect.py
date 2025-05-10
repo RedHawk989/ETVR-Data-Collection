@@ -5,7 +5,6 @@ import time
 from colorama import Fore
 import os
 import sys
-import platform
 import zipfile
 import random
 import string
@@ -32,10 +31,7 @@ class Camera:
 
             # Open camera
             self.cap = cv2.VideoCapture(self.capture_source)
-            if self.cap.isOpened():
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 
             if not self.cap.isOpened():
                 self.status_queue.put(("ERROR", "Failed to open camera"))
@@ -95,7 +91,7 @@ def main(capture_sources, eyes):
     seed = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
     print(f"{Fore.CYAN}[INFO] Run seed: {seed}")
 
-    output_dir = "eye_captures"
+    output_dir = "eye_capture"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
