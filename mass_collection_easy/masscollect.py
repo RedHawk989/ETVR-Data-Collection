@@ -5,11 +5,84 @@ import time
 from colorama import Fore
 import os
 import sys
+import platform
 import zipfile
 import random
 import string
+import subprocess
+import platform
+import shutil
 
-os.system("color")  # fix color in terminal not working
+
+
+# Create a lock for synchronizing access to speech functions
+speech_lock = threading.Lock()
+
+
+def speak(text):
+    """
+    Platform-independent text-to-speech function that returns when speech is complete.
+    Falls back to print if speech fails.
+    """
+    # Create event to signal when speech is completed
+    done_event = threading.Event()
+
+    # Start in a separate thread to avoid blocking
+    speech_thread = threading.Thread(
+        target=_speak_platform_specific,
+        args=(text, done_event),
+        daemon=True
+    )
+    speech_thread.start()
+    return done_event
+
+
+def _speak_platform_specific(text, done_event):
+    """Internal function to handle platform-specific TTS"""
+    try:
+        with speech_lock:  # Ensure only one speech process at a time
+            system = platform.system().lower()
+
+            if system == 'darwin':  # macOS
+                # Use macOS built-in say command
+                subprocess.run(['say', text], check=False, timeout=10)
+
+            elif system == 'windows':
+                # Use PowerShell's speech synthesizer
+                ps_cmd = f'Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak("{text}");'
+                subprocess.run(['powershell', '-Command', ps_cmd], check=False, timeout=10)
+
+            elif system == 'linux':
+                # Try with espeak if available
+                try:
+                    subprocess.run(['espeak', text], check=False, timeout=10)
+                except FileNotFoundError:
+                    # If espeak not found, try festival
+                    try:
+                        process = subprocess.Popen(['festival', '--tts'], stdin=subprocess.PIPE)
+                        process.communicate(input=text.encode())
+                    except FileNotFoundError:
+                        print(f"{Fore.YELLOW}[TTS] {text}")
+            else:
+                # Unknown platform, just print
+                print(f"{Fore.YELLOW}[TTS] {text}")
+    except Exception as e:
+        # If speech fails for any reason, fall back to printing
+        print(f"{Fore.YELLOW}[TTS] {text}")
+        print(f"{Fore.RED}[TTS ERROR] {str(e)}")
+    finally:
+        # Signal that speech is complete
+        done_event.set()
+
+
+# Initial welcome message
+welcome_done = speak(
+    "Welcome to EyeTrack V R data collection for Leap version 2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
+# Wait for welcome message to complete before continuing
+welcome_done.wait()
+
+# Fix color in terminal
+os.system("color")
 
 
 class Camera:
@@ -31,7 +104,6 @@ class Camera:
 
             # Open camera
             self.cap = cv2.VideoCapture(self.capture_source)
-
 
             if not self.cap.isOpened():
                 self.status_queue.put(("ERROR", "Failed to open camera"))
@@ -58,6 +130,7 @@ class Camera:
 
                 failed_reads = 0
                 frame = cv2.resize(frame, (240, 240))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self.frame_count += 1
                 elapsed = time.time() - start
                 if elapsed >= 1.0:
@@ -88,12 +161,16 @@ class Camera:
 def main(capture_sources, eyes):
     # One or two cameras
     n = len(capture_sources)
-    seed = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
+    seed = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
     print(f"{Fore.CYAN}[INFO] Run seed: {seed}")
 
-    output_dir = "eye_capture"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    output_dir = "eye_captures"
+
+    # ——— clear out any old captures ———
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+
 
     # Prepare threads and queues
     cancel_events = []
@@ -145,30 +222,61 @@ def main(capture_sources, eyes):
     for i in range(n):
         h, w = first_frames[i].shape[:2]
         fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.avi")
-        vw = cv2.VideoWriter(fn, fourcc, 30, (w, h))
+        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h))
         video_writers.append(vw)
 
     prompts = [
-        "Look left", "Look left and squint", "Look right", "Look right and squint",
-        "Look up", "Look up and squint", "Look down", "Look down and squint",
+        "Look left", "Look left and squint", "Look left and half blink", "Look right", "Look right and squint",
+        "Look right and half blink",
+        "Look up", "Look up and squint", "Look up and half blink", "Look down", "Look down and squint",
+        "Look down and half blink",
         "Look top-left", "Look top-right", "Look bottom-left", "Look bottom-right",
-        "Look straight", "Look straight and squint", "Close your eyes",
-        "Look straight and half blink", "Widen your eyes and look in random direction",
+        "Look straight", "Look straight and squint", "Look straight and half blink",
+        "Close your eyes", "Squeeze your eyes closed",
+        "Widen your eyes and look in random direction",
+        "Raise eyebrows fully and look straight",
+        "Raise eyebrows halfway and look straight",
+        "Lower eyebrows fully and look straight",
+        "Lower eyebrows halfway and look straight",
         "Raise eyebrows fully and look in random direction",
         "Raise eyebrows halfway and look in random direction",
         "Lower eyebrows fully and look in random direction",
         "Lower eyebrows halfway and look in random direction",
         "Do something random and look in random direction",
+        "Alternate between left and right quickly 2 times starting now",
+        "Look in a full circle starting now"
     ]
 
     try:
         for idx, prompt in enumerate(prompts):
-            print(f"{Fore.CYAN}[PROMPT {idx+1}/{len(prompts)}] {prompt}")
+            print(f"{Fore.CYAN}[PROMPT {idx + 1}/{len(prompts)}] {prompt}")
+
+            # Start speaking the prompt and get the event
+            speech_done = speak(f"{prompt}")
+
+            # While speaking the prompt, continue capturing frames
+            while not speech_done.is_set():
+                # Process camera frames while waiting for speech to complete
+                for j in range(n):
+                    if not output_queues[j].empty():
+                        frame, _, _ = output_queues[j].get()
+                        video_writers[j].write(frame)
+                        cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    raise KeyboardInterrupt
+                time.sleep(0.01)  # Small sleep to prevent CPU hogging
+
             # Countdown
-            for i in range(5, 0, -1):
+            for i in range(2, 0, -1):
                 print(f"{Fore.YELLOW}Capturing in {i}...")
+
+                # Start speaking the count and get the event
+                speech_done = speak(f"{i}")
+
                 t0 = time.time()
-                while time.time() - t0 < 1.0:
+                # Continue capturing frames during the 1-second countdown
+                # This combines the wait for speech and the 1-second timer
+                while (time.time() - t0 < 1.0) or not speech_done.is_set():
                     for j in range(n):
                         if not output_queues[j].empty():
                             frame, _, _ = output_queues[j].get()
@@ -176,6 +284,7 @@ def main(capture_sources, eyes):
                             cv2.imshow(f'Camera {eyes[j].upper()}', frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         raise KeyboardInterrupt
+                    time.sleep(0.01)  # Small sleep to prevent CPU hogging
             print(f"{Fore.GREEN}Capturing now!")
 
             # Capture one prompt frame per eye (blocks up to 5 s)
@@ -188,12 +297,24 @@ def main(capture_sources, eyes):
                 except queue.Empty:
                     print(f"{Fore.RED}[WARNING] Could not capture frame for prompt '{prompt}' ({eyes[j]})")
 
+            # Speak "captured" and continue recording while speaking
+            speech_done = speak("captured")
+            while not speech_done.is_set():
+                # Process camera frames while waiting for speech to complete
+                for j in range(n):
+                    if not output_queues[j].empty():
+                        frame, _, _ = output_queues[j].get()
+                        video_writers[j].write(frame)
+                        cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    raise KeyboardInterrupt
+                time.sleep(0.01)  # Small sleep to prevent CPU hogging
 
             # Save images
             clean = prompt.lower().replace(' ', '_')
             for j in range(n):
                 if prompt_frames[j] is not None:
-                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx+1:02d}_{clean}.jpeg")
+                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.jpeg")
                     cv2.imwrite(img_fn, prompt_frames[j])
                     print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
                 else:
@@ -205,6 +326,8 @@ def main(capture_sources, eyes):
         cv2.destroyAllWindows()
         print(f"{Fore.CYAN}Thank you for contributing <3")
         print(f"{Fore.CYAN}Files saved in '{output_dir}'")
+
+        # Clean up camera threads
         for ev in cancel_events:
             ev.set()
         for th in threads:
@@ -225,23 +348,6 @@ def main(capture_sources, eyes):
 
 
 if __name__ == "__main__":
-    print(f"{Fore.CYAN}[SYSTEM INFO] OpenCV version: {cv2.__version__}")
-    print(f"{Fore.CYAN}[SYSTEM INFO] Python version: {sys.version}")
-    # List cameras
-    print(f"{Fore.CYAN}[SYSTEM INFO] Checking available cameras...")
-    found = []
-    for i in range(10):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                found.append(i)
-                print(f"{Fore.GREEN}[CAMERA FOUND] {i}")
-            cap.release()
-        time.sleep(0.1)
-    if not found:
-        print(f"{Fore.YELLOW}[WARNING] No cameras detected")
-
     src_input = input('Enter camera address(es) (e.g. 0 or 0,1 or COM5): ')
     parts = [s.strip() for s in src_input.split(',') if s.strip()]
     if len(parts) > 2:

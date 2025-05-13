@@ -15,6 +15,7 @@ watchdog = "^3.0.0"
 pyserial = "^3.5"
 psutil = "^5.9.7"
 colorama = "^0.4.6"
+pyttsx3 = "^2.98"
 
 [tool.poetry.group.dev.dependencies]
 pytest-asyncio = "^0.21.1"
