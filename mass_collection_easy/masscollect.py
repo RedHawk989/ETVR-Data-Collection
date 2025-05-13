@@ -14,7 +14,6 @@ import platform
 import shutil
 
 
-
 # Create a lock for synchronizing access to speech functions
 speech_lock = threading.Lock()
 
@@ -217,12 +216,12 @@ def main(capture_sources, eyes):
         print(f"{Fore.GREEN}Camera '{eyes[i]}' initialized.")
 
     # Setup video writers
-    fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+    fourcc = cv2.VideoWriter_fourcc(*'H264')  # or (*'H264') if your build supports it
     video_writers = []
     for i in range(n):
         h, w = first_frames[i].shape[:2]
-        fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.avi")
-        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h))
+        fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.mp4")
+        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h), False)
         video_writers.append(vw)
 
     prompts = [
