@@ -10,9 +10,8 @@ import zipfile
 import random
 import string
 import subprocess
-import platform
 import shutil
-
+import warnings
 
 # Create a lock for synchronizing access to speech functions
 speech_lock = threading.Lock()
@@ -75,7 +74,8 @@ def _speak_platform_specific(text, done_event):
 
 
 # Initial welcome message
-print("Welcome to EyeTrackVR data collection for LEAPv2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
+print(
+    "Welcome to EyeTrackVR data collection for LEAPv2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
 welcome_done = speak(
     "Welcome to EyeTrack V R data collection for Leap version 2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
 # Wait for welcome message to complete before continuing
@@ -158,7 +158,59 @@ class Camera:
                 self.cap.release()
 
 
+def get_best_codec():
+    """
+    Returns the best available codec for the current platform
+    """
+    system = platform.system().lower()
+
+    # For Windows, prioritize codecs known to work well
+    if system == 'windows':
+        # Use XVID for AVI (very reliable on Windows)
+        # Use AVC1 for MP4 (more compatible than H264 tag)
+        codecs_to_try = [
+            ('XVID', 'avi'),  # XVID codec with AVI container
+            ('avc1', 'mp4'),  # AVC1 tag for H.264 in MP4 (Windows compatible)
+            ('DIVX', 'avi'),  # DIVX as fallback
+            ('MJPG', 'avi')  # MJPG as last resort (larger files but reliable)
+        ]
+    else:  # For macOS and Linux
+        codecs_to_try = [
+            ('avc1', 'mp4'),  # Try AVC1 first (H.264 equivalent)
+            ('H264', 'mp4'),  # Then try explicit H264
+            ('XVID', 'avi'),  # XVID as fallback
+            ('MJPG', 'avi')  # MJPG as last resort
+        ]
+
+    # Test each codec to find the first available one
+    for codec, container in codecs_to_try:
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            # Create a dummy video writer to test if codec works
+            temp_file = os.path.join(os.getcwd(), f"temp_test_{codec}.{container}")
+            test_writer = cv2.VideoWriter(temp_file, fourcc, 30, (240, 240), False)
+            is_opened = test_writer.isOpened()
+            test_writer.release()
+
+            # Remove the temp file if created
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+            if is_opened:
+                print(f"{Fore.GREEN}[INFO] Using {codec} codec with {container} container for video compression")
+                return fourcc, codec, container
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARNING] Codec {codec} with {container} not available: {str(e)}")
+
+    # If all codecs fail, use MJPG as a last resort
+    print(f"{Fore.YELLOW}[WARNING] Falling back to MJPG codec with AVI container")
+    return cv2.VideoWriter_fourcc(*'MJPG'), 'MJPG', 'avi'
+
+
 def main(capture_sources, eyes):
+    # Filter OpenCV warnings about codec fallbacks
+    warnings.filterwarnings("ignore", category=UserWarning)
+
     # One or two cameras
     n = len(capture_sources)
     seed = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
@@ -170,7 +222,6 @@ def main(capture_sources, eyes):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
-
 
     # Prepare threads and queues
     cancel_events = []
@@ -216,13 +267,26 @@ def main(capture_sources, eyes):
             return
         print(f"{Fore.GREEN}Camera '{eyes[i]}' initialized.")
 
+    # Determine the best codec and container format for the current platform
+    fourcc, codec_name, container_format = get_best_codec()
+
     # Setup video writers
-    fourcc = cv2.VideoWriter_fourcc(*'H264')  # or (*'H264') if your build supports it
     video_writers = []
     for i in range(n):
         h, w = first_frames[i].shape[:2]
-        fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.mp4")
-        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h), False)
+        fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.{container_format}")
+
+        # Create video writer with specific parameters for better compression
+        vw = cv2.VideoWriter(fn, fourcc, 30, (w, h), False)
+
+        # Set additional properties for better compression if available
+        if hasattr(cv2, 'CV_FOURCC') and hasattr(vw, 'set'):
+            try:
+                # Try to set quality/compression parameters
+                vw.set(cv2.VIDEOWRITER_PROP_QUALITY, 85)  # Set quality to 85% (if supported)
+            except:
+                pass
+
         video_writers.append(vw)
 
     prompts = [
@@ -260,6 +324,15 @@ def main(capture_sources, eyes):
                 for j in range(n):
                     if not output_queues[j].empty():
                         frame, _, _ = output_queues[j].get()
+
+                        # Add frame compression if needed
+                        if codec_name in ['MJPG', 'DIVX', 'XVID']:
+                            # Apply some compression to the frame before writing
+                            # Only if we're not using H.264/AVC1 which is already efficient
+                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                            _, compressed = cv2.imencode('.jpg', frame, encode_param)
+                            frame = cv2.imdecode(compressed, cv2.IMREAD_GRAYSCALE)
+
                         video_writers[j].write(frame)
                         cv2.imshow(f'Camera {eyes[j].upper()}', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -297,6 +370,19 @@ def main(capture_sources, eyes):
                 except queue.Empty:
                     print(f"{Fore.RED}[WARNING] Could not capture frame for prompt '{prompt}' ({eyes[j]})")
 
+
+
+            # Save images
+            clean = prompt.lower().replace(' ', '_')
+            for j in range(n):
+                if prompt_frames[j] is not None:
+                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.jpeg")
+                    # Save images with compression
+                    cv2.imwrite(img_fn, prompt_frames[j], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                    print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
+                else:
+                    print(f"{Fore.RED}[WARNING] No frame for '{prompt}' ({eyes[j]})")
+
             # Speak "captured" and continue recording while speaking
             speech_done = speak("captured")
             while not speech_done.is_set():
@@ -310,15 +396,6 @@ def main(capture_sources, eyes):
                     raise KeyboardInterrupt
                 time.sleep(0.01)  # Small sleep to prevent CPU hogging
 
-            # Save images
-            clean = prompt.lower().replace(' ', '_')
-            for j in range(n):
-                if prompt_frames[j] is not None:
-                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.jpeg")
-                    cv2.imwrite(img_fn, prompt_frames[j])
-                    print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
-                else:
-                    print(f"{Fore.RED}[WARNING] No frame for '{prompt}' ({eyes[j]})")
 
     except KeyboardInterrupt:
         print(f"{Fore.YELLOW}[INFO] Interrupted by user.")
