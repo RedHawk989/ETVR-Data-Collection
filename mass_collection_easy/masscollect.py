@@ -49,12 +49,12 @@ def _speak_platform_specific(text, done_event):
             elif system == 'windows':
                 # Use PowerShell's speech synthesizer
                 ps_cmd = f'Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak("{text}");'
-                subprocess.run(['powershell', '-Command', ps_cmd], check=False, timeout=10)
+                subprocess.run(['powershell', '-Command', ps_cmd], check=False, timeout=20)
 
             elif system == 'linux':
                 # Try with espeak if available
                 try:
-                    subprocess.run(['espeak', text], check=False, timeout=10)
+                    subprocess.run(['espeak', text], check=False, timeout=20)
                 except FileNotFoundError:
                     # If espeak not found, try festival
                     try:
@@ -75,6 +75,7 @@ def _speak_platform_specific(text, done_event):
 
 
 # Initial welcome message
+print("Welcome to EyeTrackVR data collection for LEAPv2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
 welcome_done = speak(
     "Welcome to EyeTrack V R data collection for Leap version 2. Follow the prompts and be sure that each pose is correct to the best of your ability.")
 # Wait for welcome message to complete before continuing
