@@ -16,7 +16,6 @@ import warnings
 # Create a lock for synchronizing access to speech functions
 speech_lock = threading.Lock()
 
-
 def speak(text):
     """
     Platform-independent text-to-speech function that returns when speech is complete.
