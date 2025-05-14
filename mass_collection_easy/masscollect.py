@@ -12,7 +12,6 @@ import string
 import subprocess
 import shutil
 import warnings
-import numpy as np
 
 # Create a lock for synchronizing access to speech functions
 speech_lock = threading.Lock()
@@ -208,180 +207,6 @@ def get_best_codec():
     return cv2.VideoWriter_fourcc(*'MJPG'), 'MJPG', 'avi'
 
 
-def split_video(input_file, first_half_file, second_half_file, codec, container_format):
-    """
-    Split a video file into two equal parts
-    """
-    try:
-        # Get video info
-        cap = cv2.VideoCapture(input_file)
-        if not cap.isOpened():
-            print(f"{Fore.RED}[ERROR] Could not open video file: {input_file}")
-            return False
-
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # Calculate midpoint
-        midpoint = frame_count // 2
-
-        # Create video writers
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        first_writer = cv2.VideoWriter(first_half_file, fourcc, fps, (width, height), False)
-        second_writer = cv2.VideoWriter(second_half_file, fourcc, fps, (width, height), False)
-
-        if not first_writer.isOpened() or not second_writer.isOpened():
-            print(f"{Fore.RED}[ERROR] Could not create output video files")
-            return False
-
-        # Process first half
-        frame_idx = 0
-        while frame_idx < midpoint:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Convert to grayscale if needed
-            if len(frame.shape) > 2 and frame.shape[2] > 1:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            first_writer.write(frame)
-            frame_idx += 1
-
-        # Process second half
-        while frame_idx < frame_count:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Convert to grayscale if needed
-            if len(frame.shape) > 2 and frame.shape[2] > 1:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            second_writer.write(frame)
-            frame_idx += 1
-
-        # Clean up
-        cap.release()
-        first_writer.release()
-        second_writer.release()
-
-        print(f"{Fore.GREEN}[INFO] Successfully split video into two parts")
-        return True
-
-    except Exception as e:
-        print(f"{Fore.RED}[ERROR] Failed to split video: {str(e)}")
-        return False
-
-
-def create_zip_files(seed, output_dir, container_format, codec_name):
-    """
-    Create the required zip files according to the specification:
-    - img_*.zip: Contains only the images
-    - L1_*.zip: Contains first half of left eye video
-    - L2_*.zip: Contains second half of left eye video
-    - R1_*.zip: Contains first half of right eye video
-    - R2_*.zip: Contains second half of right eye video
-    """
-    try:
-        # Create directories for each zip content
-        img_dir = os.path.join(output_dir, "images")
-        l1_dir = os.path.join(output_dir, "left_eye_part1")
-        l2_dir = os.path.join(output_dir, "left_eye_part2")
-        r1_dir = os.path.join(output_dir, "right_eye_part1")
-        r2_dir = os.path.join(output_dir, "right_eye_part2")
-
-        # Create directories if they don't exist
-        for directory in [img_dir, l1_dir, l2_dir, r1_dir, r2_dir]:
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-
-        # Split videos
-        print(f"{Fore.CYAN}[INFO] Splitting videos into parts...")
-
-        # Get video files
-        left_video = None
-        right_video = None
-
-        for file in os.listdir(output_dir):
-            if file.endswith(f".{container_format}"):
-                if "_l." in file.lower() or "_l_" in file.lower() or "_left" in file.lower():
-                    left_video = os.path.join(output_dir, file)
-                elif "_r." in file.lower() or "_r_" in file.lower() or "_right" in file.lower():
-                    right_video = os.path.join(output_dir, file)
-
-        # Split left video if it exists
-        if left_video:
-            left_part1 = os.path.join(l1_dir, f"left_part1.{container_format}")
-            left_part2 = os.path.join(l2_dir, f"left_part2.{container_format}")
-            split_video(left_video, left_part1, left_part2, codec_name, container_format)
-
-        # Split right video if it exists
-        if right_video:
-            right_part1 = os.path.join(r1_dir, f"right_part1.{container_format}")
-            right_part2 = os.path.join(r2_dir, f"right_part2.{container_format}")
-            split_video(right_video, right_part1, right_part2, codec_name, container_format)
-
-        # Copy images to img directory
-        for file in os.listdir(output_dir):
-            if file.endswith(".png") or file.endswith(".jpg") or file.endswith(".jpeg"):
-                shutil.copy2(os.path.join(output_dir, file), os.path.join(img_dir, file))
-
-        # Create zip files
-        print(f"{Fore.CYAN}[INFO] Creating zip files...")
-
-        # Create image zip
-        img_zip = f"img_{seed}_ETVR_images.zip"
-        with zipfile.ZipFile(img_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(img_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), os.path.join("images", file))
-
-        # Create left eye part 1 zip
-        l1_zip = f"L1_{seed}_ETVR_left_part1.zip"
-        with zipfile.ZipFile(l1_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(l1_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), os.path.join("left_eye_part1", file))
-
-        # Create left eye part 2 zip
-        l2_zip = f"L2_{seed}_ETVR_left_part2.zip"
-        with zipfile.ZipFile(l2_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(l2_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), os.path.join("left_eye_part2", file))
-
-        # Create right eye part 1 zip
-        r1_zip = f"R1_{seed}_ETVR_right_part1.zip"
-        with zipfile.ZipFile(r1_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(r1_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), os.path.join("right_eye_part1", file))
-
-        # Create right eye part 2 zip
-        r2_zip = f"R2_{seed}_ETVR_right_part2.zip"
-        with zipfile.ZipFile(r2_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(r2_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), os.path.join("right_eye_part2", file))
-
-        print(f"{Fore.GREEN}[INFO] Successfully created zip files:")
-        print(f"{Fore.GREEN}[INFO] - {img_zip}")
-        print(f"{Fore.GREEN}[INFO] - {l1_zip}")
-        print(f"{Fore.GREEN}[INFO] - {l2_zip}")
-        print(f"{Fore.GREEN}[INFO] - {r1_zip}")
-        print(f"{Fore.GREEN}[INFO] - {r2_zip}")
-
-        return True
-
-    except Exception as e:
-        print(f"{Fore.RED}[ERROR] Failed to create zip files: {str(e)}")
-        return False
-
-
 def main(capture_sources, eyes):
     # Filter OpenCV warnings about codec fallbacks
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -545,13 +370,14 @@ def main(capture_sources, eyes):
                 except queue.Empty:
                     print(f"{Fore.RED}[WARNING] Could not capture frame for prompt '{prompt}' ({eyes[j]})")
 
+
             # Save images
             clean = prompt.lower().replace(' ', '_')
             for j in range(n):
                 if prompt_frames[j] is not None:
-                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.png")
+                    img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.jpeg")
                     # Save images with compression
-                    cv2.imwrite(img_fn, prompt_frames[j])
+                    cv2.imwrite(img_fn, prompt_frames[j], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                     print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
                 else:
                     print(f"{Fore.RED}[WARNING] No frame for '{prompt}' ({eyes[j]})")
@@ -567,6 +393,7 @@ def main(capture_sources, eyes):
                         cv2.imshow(f'Camera {eyes[j].upper()}', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     raise KeyboardInterrupt
+                time.sleep(0.01)  # Small sleep to prevent CPU hogging
 
 
     except KeyboardInterrupt:
@@ -584,30 +411,20 @@ def main(capture_sources, eyes):
         for vw in video_writers:
             vw.release()
 
-        # Create the 5 required zip files
-        print(f"{Fore.CYAN}[INFO] Creating separate zip files for images and video parts...")
-        result = create_zip_files(seed, output_dir, container_format, codec_name)
-
-        if result:
-            print(f"{Fore.GREEN}[INFO] All 5 zip files created successfully!")
-        else:
-            print(f"{Fore.RED}[ERROR] Failed to create all required zip files.")
-
-        # Original ZIP output (keeping for backward compatibility)
+        # ZIP output
         zip_name = f"{seed}_ETVR_User_Data_Output.zip"
-        print(f"{Fore.CYAN}[INFO] Creating original full archive {zip_name}…")
+        print(f"{Fore.CYAN}[INFO] Creating archive {zip_name}…")
         with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(output_dir):
                 for fname in files:
-                    if fname.endswith(".png") or fname.endswith(f".{container_format}"):
-                        full = os.path.join(root, fname)
-                        arc = os.path.relpath(full, start=os.path.dirname(output_dir))
-                        zipf.write(full, arc)
-        print(f"{Fore.GREEN}[INFO] Original archive created: {zip_name}")
+                    full = os.path.join(root, fname)
+                    arc = os.path.relpath(full, start=os.path.dirname(output_dir))
+                    zipf.write(full, arc)
+        print(f"{Fore.GREEN}[INFO] Archive created: {zip_name}")
 
 
 if __name__ == "__main__":
-    src_input = input('Enter camera address(es) in left, right (e.g. 0 or 0,1 or COM5): ')
+    src_input = input('Enter camera address(es) (e.g. 0 or 0,1 or COM5): ')
     parts = [s.strip() for s in src_input.split(',') if s.strip()]
     if len(parts) > 2:
         print(f"{Fore.YELLOW}Only first two will be used.")
