@@ -94,6 +94,7 @@ class Camera:
         self.frame_count = 0
         self.fps = 0
         self.cap = None
+        self.total_frames = 0  # Track total frames captured
 
     def run(self):
         try:
@@ -131,6 +132,7 @@ class Camera:
                 frame = cv2.resize(frame, (240, 240))
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self.frame_count += 1
+                self.total_frames += 1  # Increment total frame counter
                 elapsed = time.time() - start
                 if elapsed >= 1.0:
                     self.fps = self.frame_count / elapsed
@@ -145,7 +147,7 @@ class Camera:
                         break
 
                 try:
-                    self.output_queue.put((frame, self.frame_count, self.fps), timeout=0.1)
+                    self.output_queue.put((frame, self.total_frames, self.fps), timeout=0.1)
                     time.sleep(0.01)
                 except queue.Full:
                     pass
@@ -222,6 +224,13 @@ def main(capture_sources, eyes):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
+    # Initialize timestamps file
+    timestamps_file = os.path.join(output_dir, "timestamps.txt")
+    with open(timestamps_file, 'w') as f:
+        f.write("# Format: <frame_number> <prompt_text>\n")
+        f.write("# Recorded on: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        f.write("# Seed: " + seed + "\n\n")
+
     # Prepare threads and queues
     cancel_events = []
     status_queues = []
@@ -276,15 +285,9 @@ def main(capture_sources, eyes):
         fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.{container_format}")
 
         # Create video writer with specific parameters for better compression
-        vw = cv2.VideoWriter(fn, fourcc, 30, (w, h), False)
+        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h), False)
 
         # Set additional properties for better compression if available
-        if hasattr(cv2, 'CV_FOURCC') and hasattr(vw, 'set'):
-            try:
-                # Try to set quality/compression parameters
-                vw.set(cv2.VIDEOWRITER_PROP_QUALITY, 85)  # Set quality to 85% (if supported)
-            except:
-                pass
 
         video_writers.append(vw)
 
@@ -322,14 +325,13 @@ def main(capture_sources, eyes):
                 # Process camera frames while waiting for speech to complete
                 for j in range(n):
                     if not output_queues[j].empty():
-                        frame, _, _ = output_queues[j].get()
+                        frame, frame_num, _ = output_queues[j].get()
 
                         # Add frame compression if needed
                         if codec_name in ['MJPG', 'DIVX', 'XVID']:
                             # Apply some compression to the frame before writing
                             # Only if we're not using H.264/AVC1 which is already efficient
-                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                            _, compressed = cv2.imencode('.jpg', frame, encode_param)
+                            _, compressed = cv2.imencode('.jpg', frame)
                             frame = cv2.imdecode(compressed, cv2.IMREAD_GRAYSCALE)
 
                         video_writers[j].write(frame)
@@ -351,7 +353,7 @@ def main(capture_sources, eyes):
                 while (time.time() - t0 < 1.0) or not speech_done.is_set():
                     for j in range(n):
                         if not output_queues[j].empty():
-                            frame, _, _ = output_queues[j].get()
+                            frame, frame_num, _ = output_queues[j].get()
                             video_writers[j].write(frame)
                             cv2.imshow(f'Camera {eyes[j].upper()}', frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -361,14 +363,22 @@ def main(capture_sources, eyes):
 
             # Capture one prompt frame per eye (blocks up to 5 s)
             prompt_frames = [None] * n
+            frame_numbers = [None] * n
             for j in range(n):
                 try:
-                    frame, _, _ = output_queues[j].get(timeout=5.0)
+                    frame, frame_num, _ = output_queues[j].get(timeout=5.0)
                     prompt_frames[j] = frame.copy()
+                    frame_numbers[j] = frame_num  # Store the frame number
                     video_writers[j].write(frame)
                 except queue.Empty:
                     print(f"{Fore.RED}[WARNING] Could not capture frame for prompt '{prompt}' ({eyes[j]})")
 
+            # Record the timestamp (using the first camera's frame number if available)
+            timestamp_frame = next((frame_numbers[i] for i in range(n) if frame_numbers[i] is not None), None)
+            if timestamp_frame is not None:
+                with open(timestamps_file, 'a') as f:
+                    f.write(f"{timestamp_frame} #{prompt}#\n")
+                print(f"{Fore.CYAN}[TIMESTAMP] Frame {timestamp_frame}: {prompt}")
 
             # Save images
             clean = prompt.lower().replace(' ', '_')
@@ -376,7 +386,7 @@ def main(capture_sources, eyes):
                 if prompt_frames[j] is not None:
                     img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.jpeg")
                     # Save images with compression
-                    cv2.imwrite(img_fn, prompt_frames[j], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                    cv2.imwrite(img_fn, prompt_frames[j])
                     print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
                 else:
                     print(f"{Fore.RED}[WARNING] No frame for '{prompt}' ({eyes[j]})")
@@ -387,7 +397,7 @@ def main(capture_sources, eyes):
                 # Process camera frames while waiting for speech to complete
                 for j in range(n):
                     if not output_queues[j].empty():
-                        frame, _, _ = output_queues[j].get()
+                        frame, frame_num, _ = output_queues[j].get()
                         video_writers[j].write(frame)
                         cv2.imshow(f'Camera {eyes[j].upper()}', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
