@@ -425,11 +425,12 @@ def main(capture_sources, eyes):
         print(f"{Fore.CYAN}[INFO] Creating archive {zip_name}…")
         with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(output_dir):
-                for fname in files:
-                    full = os.path.join(root, fname)
-                    arc = os.path.relpath(full, start=os.path.dirname(output_dir))
-                    zipf.write(full, arc)
-        print(f"{Fore.GREEN}[INFO] Archive created: {zip_name}")
+                for file in files:
+                    filepath = os.path.join(root, file)
+                    # Add file without including the folder name in the archive
+                    arcname = os.path.relpath(filepath, start=output_dir)
+                    zipf.write(filepath, arcname)
+        print(f"{Fore.GREEN}[INFO] Created archive: {zip_name}")
 
 
 if __name__ == "__main__":
