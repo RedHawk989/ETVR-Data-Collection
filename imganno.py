@@ -5,7 +5,7 @@ import time
 import sys
 
 # Constants
-MAX_POINTS = 7
+MAX_POINTS = 11
 KEYPOINT_COLOR = (255, 255, 0)
 KEYPOINT_ALPHA = 0.30 # Transparency value (0.0 - fully transparent, 1.0 - fully opaque)
 last_annotated_index_path = "last_annotated_index.txt"

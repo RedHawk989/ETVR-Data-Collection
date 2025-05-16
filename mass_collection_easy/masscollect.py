@@ -12,9 +12,14 @@ import string
 import subprocess
 import shutil
 import warnings
+import numpy as np
+import serial
+import serial.tools.list_ports
+from enum import Enum
 
 # Create a lock for synchronizing access to speech functions
 speech_lock = threading.Lock()
+
 
 def speak(text):
     """
@@ -83,8 +88,193 @@ welcome_done.wait()
 # Fix color in terminal
 os.system("color")
 
+# Constants for serial camera
+WAIT_TIME = 0.1
+ETVR_HEADER = b"\xff\xa0"
+ETVR_HEADER_FRAME = b"\xff\xa1"
+ETVR_HEADER_LEN = 6
 
-class Camera:
+
+class CameraState(Enum):
+    CONNECTING = 0
+    CONNECTED = 1
+    DISCONNECTED = 2
+
+
+def is_serial_capture_source(addr):
+    """Check if capture source is a serial port"""
+    if isinstance(addr, str):
+        return addr.startswith("COM") or addr.startswith("/dev/cu") or addr.startswith("/dev/tty")
+    return False
+
+
+class SerialCamera:
+    """Camera class for handling serial camera connections (COM ports)"""
+
+    def __init__(self, capture_source, cancellation_event, capture_event, status_queue, output_queue):
+        self.camera_status = CameraState.CONNECTING
+        self.capture_source = capture_source
+        self.camera_status_outgoing = status_queue
+        self.camera_output_outgoing = output_queue
+        self.capture_event = capture_event
+        self.cancellation_event = cancellation_event
+        self.current_capture_source = capture_source
+        self.serial_connection = None
+        self.last_frame_time = time.time()
+        self.frame_number = 0
+        self.fps = 0
+        self.bps = 0
+        self.start = True
+        self.buffer = b""
+        self.pf_fps = 0
+        self.prevft = time.time()
+        self.newft = 0
+        self.fl = [0]
+        self.total_frames = 0  # Track total frames captured
+        self.error_message = f"{Fore.YELLOW}[WARN] Serial capture source {{}} not found, retrying...{Fore.RESET}"
+
+    def __del__(self):
+        self.cleanup_resources()
+
+    def cleanup_resources(self):
+        if self.serial_connection is not None:
+            self.serial_connection.close()
+
+    def run(self):
+        try:
+            while not self.cancellation_event.is_set():
+                if self.serial_connection is None or not self.serial_connection.is_open or self.camera_status == CameraState.DISCONNECTED:
+                    port = self.capture_source
+                    self.current_capture_source = port
+                    self.start_serial_connection(port)
+
+                if self.camera_status == CameraState.CONNECTED:
+                    self.get_serial_camera_picture()
+                else:
+                    if self.cancellation_event.wait(WAIT_TIME):
+                        break
+        except Exception as e:
+            self.camera_status_outgoing.put(("ERROR", str(e)))
+        finally:
+            self.cleanup_resources()
+
+    def start_serial_connection(self, port):
+        if self.serial_connection is not None and self.serial_connection.is_open:
+            if self.serial_connection.port == port:
+                return
+            self.serial_connection.close()
+
+        com_ports = [tuple(p) for p in list(serial.tools.list_ports.comports())]
+        if not any(p for p in com_ports if port in p):
+            self.camera_status_outgoing.put(("WARNING", f"Port {port} not found, retrying..."))
+            return
+
+        try:
+            rate = 115200 if sys.platform == "darwin" else 3000000
+            conn = serial.Serial(baudrate=rate, port=port, xonxoff=False, dsrdtr=False, rtscts=False)
+            if sys.platform == "win32":
+                buffer_size = 32768
+                conn.set_buffer_size(rx_size=buffer_size, tx_size=buffer_size)
+
+            self.camera_status_outgoing.put(("INFO", f"ETVR Serial Tracker device connected on {port}"))
+            self.serial_connection = conn
+            self.camera_status = CameraState.CONNECTED
+        except serial.SerialException as e:
+            self.camera_status_outgoing.put(("ERROR", f"Failed to connect on {port}: {str(e)}"))
+            self.camera_status = CameraState.DISCONNECTED
+
+    def get_next_packet_bounds(self):
+        beg = -1
+        while beg == -1:
+            if self.cancellation_event.is_set():
+                return None, None
+            self.buffer += self.serial_connection.read(2048)
+            beg = self.buffer.find(ETVR_HEADER + ETVR_HEADER_FRAME)
+        if beg > 0:
+            self.buffer = self.buffer[beg:]
+            beg = 0
+        end = int.from_bytes(self.buffer[4:6], signed=False, byteorder="little")
+        self.buffer += self.serial_connection.read(end - len(self.buffer))
+        return beg, end
+
+    def get_next_jpeg_frame(self):
+        beg, end = self.get_next_packet_bounds()
+        if beg is None or end is None:
+            return None
+        jpeg = self.buffer[beg + ETVR_HEADER_LEN: end + ETVR_HEADER_LEN]
+        self.buffer = self.buffer[end + ETVR_HEADER_LEN:]
+        return jpeg
+
+    def get_serial_camera_picture(self):
+        if self.cancellation_event.is_set():
+            return
+
+        conn = self.serial_connection
+        if conn is None or not conn.is_open:
+            return
+
+        try:
+            if conn.in_waiting:
+                jpeg = self.get_next_jpeg_frame()
+                if jpeg:
+                    image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+                    if image is None:
+                        self.camera_status_outgoing.put(("WARNING", "Frame drop. Corrupted JPEG."))
+                        return
+
+                    if conn.in_waiting >= 32768:
+                        conn.reset_input_buffer()
+                        self.buffer = b""
+
+                    # Convert to grayscale if needed
+                    if len(image.shape) > 2 and image.shape[2] > 1:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+                    # Resize to match expected size
+                    image = cv2.resize(image, (240, 240))
+
+                    self.frame_number += 1
+                    self.total_frames += 1
+
+                    current_frame_time = time.time()
+                    if current_frame_time != self.prevft:
+                        self.fps = 1 / (current_frame_time - self.prevft)
+                        self.prevft = current_frame_time
+                        if len(self.fl) < 60:
+                            self.fl.append(self.fps)
+                        else:
+                            self.fl.pop(0)
+                            self.fl.append(self.fps)
+                        self.fps = sum(self.fl) / len(self.fl)
+
+                    # Clear old frame
+                    while not self.camera_output_outgoing.empty():
+                        try:
+                            self.camera_output_outgoing.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    try:
+                        self.camera_output_outgoing.put((image, self.total_frames, self.fps), timeout=0.1)
+                        time.sleep(0.01)
+                    except queue.Full:
+                        pass
+
+        except serial.SerialException as e:
+            self.camera_status_outgoing.put(("WARNING", f"Serial capture source problem: {str(e)}"))
+            if conn.is_open:
+                conn.close()
+            self.camera_status = CameraState.DISCONNECTED
+        except OSError as e:
+            self.camera_status_outgoing.put(("WARNING", f"OS error: {str(e)}"))
+            if conn.is_open:
+                conn.close()
+            self.camera_status = CameraState.DISCONNECTED
+
+
+class CV2Camera:
+    """Camera class for handling standard webcams via OpenCV"""
+
     def __init__(self, capture_source, cancellation_event, capture_event, status_queue, output_queue):
         self.capture_source = capture_source
         self.cancellation_event = cancellation_event
@@ -244,7 +434,15 @@ def main(capture_sources, eyes):
         oq = queue.Queue(maxsize=1)
         status_queues.append(sq)
         output_queues.append(oq)
-        cam = Camera(capture_sources[i], ce, None, sq, oq)
+
+        # Create appropriate camera type based on source
+        if is_serial_capture_source(capture_sources[i]):
+            print(f"{Fore.CYAN}[INFO] Using serial camera for source: {capture_sources[i]}")
+            cam = SerialCamera(capture_sources[i], ce, None, sq, oq)
+        else:
+            print(f"{Fore.CYAN}[INFO] Using CV2 camera for source: {capture_sources[i]}")
+            cam = CV2Camera(capture_sources[i], ce, None, sq, oq)
+
         th = threading.Thread(target=cam.run)
         threads.append(th)
         th.start()
@@ -441,7 +639,7 @@ if __name__ == "__main__":
         parts = parts[:2]
     sources = []
     for p in parts:
-        if p.isdigit():
+        if p.isdigit() and not is_serial_capture_source(p):
             sources.append(int(p))
         else:
             sources.append(p)
