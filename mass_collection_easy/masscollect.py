@@ -104,7 +104,7 @@ class CameraState(Enum):
 def is_serial_capture_source(addr):
     """Check if capture source is a serial port"""
     if isinstance(addr, str):
-        return addr.startswith("COM") or addr.startswith("/dev/cu") or addr.startswith("/dev/tty")
+        return addr.lower().startswith("com") or addr.startswith("/dev/cu") or addr.startswith("/dev/tty")
     return False
 
 
@@ -414,12 +414,15 @@ def main(capture_sources, eyes):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
-    # Initialize timestamps file
-    timestamps_file = os.path.join(output_dir, "timestamps.txt")
-    with open(timestamps_file, 'w') as f:
-        f.write("# Format: <frame_number> <prompt_text>\n")
-        f.write("# Recorded on: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
-        f.write("# Seed: " + seed + "\n\n")
+    # Initialize separate timestamp files for each camera
+    timestamp_files = []
+    for i in range(n):
+        timestamp_file = os.path.join(output_dir, f"{seed}_{eyes[i]}_timestamps.txt")
+        with open(timestamp_file, 'w') as f:
+            f.write("# Format: <frame_number> <prompt_text>\n")
+            f.write("# Recorded on: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+            f.write("# Seed: " + seed + "\n\n")
+        timestamp_files.append(timestamp_file)
 
     # Prepare threads and queues
     cancel_events = []
@@ -573,10 +576,13 @@ def main(capture_sources, eyes):
 
             # Record the timestamp (using the first camera's frame number if available)
             timestamp_frame = next((frame_numbers[i] for i in range(n) if frame_numbers[i] is not None), None)
-            if timestamp_frame is not None:
-                with open(timestamps_file, 'a') as f:
-                    f.write(f"{timestamp_frame} #{prompt}#\n")
-                print(f"{Fore.CYAN}[TIMESTAMP] Frame {timestamp_frame}: {prompt}")
+            # Write timestamp for the specific eye
+
+            for j in range(n):
+                if frame_numbers[j] is not None:
+                    with open(timestamp_files[j], 'a') as f:
+                        f.write(f"{frame_numbers[j]} #{prompt}#\n")
+                    print(f"{Fore.CYAN}[TIMESTAMP] {eyes[j].upper()} - Frame {frame_numbers[j]}: {prompt}")
 
             # Save images
             clean = prompt.lower().replace(' ', '_')
@@ -631,6 +637,7 @@ def main(capture_sources, eyes):
         print(f"{Fore.GREEN}[INFO] Created archive: {zip_name}")
 
 
+
 if __name__ == "__main__":
     src_input = input('Enter camera address(es) (e.g. 0 or 0,1 or COM5): ')
     parts = [s.strip() for s in src_input.split(',') if s.strip()]
@@ -639,9 +646,12 @@ if __name__ == "__main__":
         parts = parts[:2]
     sources = []
     for p in parts:
+
         if p.isdigit() and not is_serial_capture_source(p):
             sources.append(int(p))
         else:
+            if not (p.lower().startswith("http://") or p.lower().startswith("https://")):
+                p = "http://" + p
             sources.append(p)
 
     if len(sources) == 1:
