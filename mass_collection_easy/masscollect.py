@@ -646,7 +646,6 @@ if __name__ == "__main__":
         parts = parts[:2]
     sources = []
     for p in parts:
-        print(p)
         if p.isdigit() and not is_serial_capture_source(p):
             sources.append(int(p))
         elif is_serial_capture_source(p):
