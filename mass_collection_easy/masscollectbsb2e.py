@@ -22,10 +22,6 @@ speech_lock = threading.Lock()
 
 
 def speak(text):
-    """
-    Platform-independent text-to-speech function that returns when speech is complete.
-    Falls back to print if speech fails.
-    """
     # Create event to signal when speech is completed
     done_event = threading.Event()
 
@@ -40,7 +36,6 @@ def speak(text):
 
 
 def _speak_platform_specific(text, done_event):
-    """Internal function to handle platform-specific TTS"""
     try:
         with speech_lock:  # Ensure only one speech process at a time
             system = platform.system().lower()
@@ -102,14 +97,160 @@ class CameraState(Enum):
 
 
 def is_serial_capture_source(addr):
-    """Check if capture source is a serial port"""
     if isinstance(addr, str):
         return addr.lower().startswith("com") or addr.startswith("/dev/cu") or addr.startswith("/dev/tty")
     return False
 
 
+class SplitUVCCamera:
+
+    def __init__(self, capture_source, cancellation_event, status_queue, left_output_queue, right_output_queue):
+        self.capture_source = capture_source
+        self.cancellation_event = cancellation_event
+        self.status_queue = status_queue
+        self.left_output_queue = left_output_queue
+        self.right_output_queue = right_output_queue
+        self.frame_count = 0
+        self.fps = 0
+        self.cap = None
+        self.total_frames = 0  # Track total frames captured
+
+    def run(self):
+        try:
+            # Convert source to integer if numeric
+            if isinstance(self.capture_source, str) and self.capture_source.isdigit():
+                self.capture_source = int(self.capture_source)
+
+            # Try different backends for better compatibility
+            backends_to_try = [
+                cv2.CAP_DSHOW,  # DirectShow (Windows)
+                cv2.CAP_V4L2,  # Video4Linux (Linux)
+                cv2.CAP_AVFOUNDATION,  # AVFoundation (macOS)
+                cv2.CAP_ANY  # Let OpenCV choose
+            ]
+
+            self.cap = None
+            for backend in backends_to_try:
+                try:
+                    self.status_queue.put(("INFO", f"Trying backend: {backend}"))
+                    temp_cap = cv2.VideoCapture(self.capture_source, backend)
+                    if temp_cap.isOpened():
+                        # Test if we can actually read a frame
+                        ret, test_frame = temp_cap.read()
+                        if ret and test_frame is not None:
+                            self.cap = temp_cap
+                            self.status_queue.put(("INFO", f"Successfully opened camera with backend: {backend}"))
+                            break
+                        else:
+                            temp_cap.release()
+                    else:
+                        temp_cap.release()
+                except Exception as e:
+                    self.status_queue.put(("WARNING", f"Backend {backend} failed: {str(e)}"))
+                    continue
+
+            if self.cap is None or not self.cap.isOpened():
+                self.status_queue.put(("ERROR", "Failed to open camera with any backend"))
+                return
+
+            # Set camera properties for better performance - do this after successful open
+            try:
+                # Set buffer size to reduce latency
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+                # Get current resolution
+                current_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                current_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                self.status_queue.put(("INFO", f"Camera resolution: {current_width}x{current_height}"))
+
+                # Try to set frame rate (optional)
+                self.cap.set(cv2.CAP_PROP_FPS, 30)  # Use 30 FPS as more cameras support this
+
+            except Exception as e:
+                self.status_queue.put(("WARNING", f"Could not set camera properties: {str(e)}"))
+
+            self.status_queue.put(("INFO", "Split UVC camera initialized successfully"))
+            failed_reads = 0
+            max_failed = 10
+            start = time.time()
+            fps_counter = 0
+            fps_start = time.time()
+
+            while not self.cancellation_event.is_set():
+                ret, frame = self.cap.read()
+                if not ret:
+                    failed_reads += 1
+                    self.status_queue.put(("WARNING", f"Failed to grab frame ({failed_reads}/{max_failed})"))
+                    if failed_reads >= max_failed:
+                        self.status_queue.put(("WARNING", "Resetting camera"))
+                        self.cap.release()
+                        time.sleep(1)
+                        self.cap = cv2.VideoCapture(self.capture_source)
+                        failed_reads = 0
+                    time.sleep(0.1)
+                    continue
+
+                failed_reads = 0
+
+                # Get frame dimensions
+                height, width = frame.shape[:2]
+
+                # Split frame down the middle
+                mid_point = width // 2
+                left_frame = frame[:, :mid_point]  # Left half
+                right_frame = frame[:, mid_point:]  # Right half
+
+                # Resize each half to 240x240 and convert to grayscale
+                left_frame = cv2.resize(left_frame, (240, 240))
+                right_frame = cv2.resize(right_frame, (240, 240))
+
+                if len(left_frame.shape) > 2:
+                    left_frame = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                if len(right_frame.shape) > 2:
+                    right_frame = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+
+                self.total_frames += 1
+                fps_counter += 1
+
+                # Calculate FPS
+                fps_elapsed = time.time() - fps_start
+                if fps_elapsed >= 1.0:
+                    self.fps = fps_counter / fps_elapsed
+                    fps_counter = 0
+                    fps_start = time.time()
+
+                # Clear old frames from queues to prevent backlog
+                self._clear_queue(self.left_output_queue)
+                self._clear_queue(self.right_output_queue)
+
+                # Put frames in respective queues
+                try:
+                    self.left_output_queue.put((left_frame, self.total_frames, self.fps), timeout=0.01)
+                except queue.Full:
+                    pass  # Drop frame if queue is full
+
+                try:
+                    self.right_output_queue.put((right_frame, self.total_frames, self.fps), timeout=0.01)
+                except queue.Full:
+                    pass  # Drop frame if queue is full
+
+                time.sleep(0.001)  # Small sleep to prevent CPU hogging
+
+        except Exception as e:
+            self.status_queue.put(("ERROR", str(e)))
+        finally:
+            if self.cap is not None:
+                self.cap.release()
+
+    def _clear_queue(self, q):
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+
 class SerialCamera:
-    """Camera class for handling serial camera connections (COM ports)"""
 
     def __init__(self, capture_source, cancellation_event, capture_event, status_queue, output_queue):
         self.camera_status = CameraState.CONNECTING
@@ -226,10 +367,12 @@ class SerialCamera:
                         conn.reset_input_buffer()
                         self.buffer = b""
 
-                    # Keep original image format and size - no conversion or resizing
-                    # Convert to grayscale only if image is color (for consistency with display)
+                    # Convert to grayscale if needed
                     if len(image.shape) > 2 and image.shape[2] > 1:
                         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+                    # Resize to match expected size
+                    image = cv2.resize(image, (240, 240))
 
                     self.frame_number += 1
                     self.total_frames += 1
@@ -270,90 +413,7 @@ class SerialCamera:
             self.camera_status = CameraState.DISCONNECTED
 
 
-class CV2Camera:
-    """Camera class for handling standard webcams via OpenCV"""
-
-    def __init__(self, capture_source, cancellation_event, capture_event, status_queue, output_queue):
-        self.capture_source = capture_source
-        self.cancellation_event = cancellation_event
-        self.capture_event = capture_event
-        self.status_queue = status_queue
-        self.output_queue = output_queue
-        self.frame_count = 0
-        self.fps = 0
-        self.cap = None
-        self.total_frames = 0  # Track total frames captured
-
-    def run(self):
-        try:
-            # Convert source to integer if numeric
-            if isinstance(self.capture_source, str) and self.capture_source.isdigit():
-                self.capture_source = int(self.capture_source)
-
-            # Open camera
-            self.cap = cv2.VideoCapture(self.capture_source)
-
-            if not self.cap.isOpened():
-                self.status_queue.put(("ERROR", "Failed to open camera"))
-                return
-
-            self.status_queue.put(("INFO", "Camera initialized successfully"))
-            failed_reads = 0
-            max_failed = 10
-            start = time.time()
-
-            while not self.cancellation_event.is_set():
-                ret, frame = self.cap.read()
-                if not ret:
-                    failed_reads += 1
-                    self.status_queue.put(("WARNING", f"Failed to grab frame ({failed_reads}/{max_failed})"))
-                    if failed_reads >= max_failed:
-                        self.status_queue.put(("WARNING", "Resetting camera"))
-                        self.cap.release()
-                        time.sleep(1)
-                        self.cap = cv2.VideoCapture(self.capture_source)
-                        failed_reads = 0
-                    time.sleep(0.2)
-                    continue
-
-                failed_reads = 0
-                # Keep original frame size and format - no resizing or color conversion
-                # Only convert to grayscale for consistency with serial camera display
-                if len(frame.shape) > 2 and frame.shape[2] > 1:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-                self.frame_count += 1
-                self.total_frames += 1  # Increment total frame counter
-                elapsed = time.time() - start
-                if elapsed >= 1.0:
-                    self.fps = self.frame_count / elapsed
-                    self.frame_count = 0
-                    start = time.time()
-
-                # Clear old frame
-                while not self.output_queue.empty():
-                    try:
-                        self.output_queue.get_nowait()
-                    except queue.Empty:
-                        break
-
-                try:
-                    self.output_queue.put((frame, self.total_frames, self.fps), timeout=0.1)
-                    time.sleep(0.01)
-                except queue.Full:
-                    pass
-
-        except Exception as e:
-            self.status_queue.put(("ERROR", str(e)))
-        finally:
-            if self.cap is not None:
-                self.cap.release()
-
-
 def get_best_codec():
-    """
-    Returns the best available codec for the current platform
-    """
     system = platform.system().lower()
 
     # For Windows, prioritize codecs known to work well
@@ -399,67 +459,138 @@ def get_best_codec():
     return cv2.VideoWriter_fourcc(*'MJPG'), 'MJPG', 'avi'
 
 
-def main(capture_sources, eyes):
+def list_available_cameras():
+
+    available_cameras = []
+    for i in range(10):  # Check first 10 indices
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                available_cameras.append(i)
+                height, width = frame.shape[:2]
+                print(f"{Fore.GREEN}[INFO] Camera {i}: Available ({width}x{height})")
+            cap.release()
+        else:
+            # Try with different backends
+            for backend in [cv2.CAP_DSHOW, cv2.CAP_V4L2, cv2.CAP_AVFOUNDATION]:
+                try:
+                    cap = cv2.VideoCapture(i, backend)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret and frame is not None:
+                            available_cameras.append(i)
+                            height, width = frame.shape[:2]
+                            print(f"{Fore.GREEN}[INFO] Camera {i}: Available with backend {backend} ({width}x{height})")
+                            cap.release()
+                            break
+                    cap.release()
+                except:
+                    continue
+
+    if not available_cameras:
+        print(f"{Fore.RED}[ERROR] No cameras found!")
+    return available_cameras
+
+    system = platform.system().lower()
+
+    # For Windows, prioritize codecs known to work well
+    if system == 'windows':
+        # Use XVID for AVI (very reliable on Windows)
+        # Use AVC1 for MP4 (more compatible than H264 tag)
+        codecs_to_try = [
+            ('XVID', 'avi'),  # XVID codec with AVI container
+            ('avc1', 'mp4'),  # AVC1 tag for H.264 in MP4 (Windows compatible)
+            ('DIVX', 'avi'),  # DIVX as fallback
+            ('MJPG', 'avi')  # MJPG as last resort (larger files but reliable)
+        ]
+    else:  # For macOS and Linux
+        codecs_to_try = [
+            ('avc1', 'mp4'),  # Try AVC1 first (H.264 equivalent)
+            ('H264', 'mp4'),  # Then try explicit H264
+            ('XVID', 'avi'),  # XVID as fallback
+            ('MJPG', 'avi')  # MJPG as last resort
+        ]
+
+    # Test each codec to find the first available one
+    for codec, container in codecs_to_try:
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            # Create a dummy video writer to test if codec works
+            temp_file = os.path.join(os.getcwd(), f"temp_test_{codec}.{container}")
+            test_writer = cv2.VideoWriter(temp_file, fourcc, 30, (240, 240), False)
+            is_opened = test_writer.isOpened()
+            test_writer.release()
+
+            # Remove the temp file if created
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+            if is_opened:
+                print(f"{Fore.GREEN}[INFO] Using {codec} codec with {container} container for video compression")
+                return fourcc, codec, container
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARNING] Codec {codec} with {container} not available: {str(e)}")
+
+    # If all codecs fail, use MJPG as a last resort
+    print(f"{Fore.YELLOW}[WARNING] Falling back to MJPG codec with AVI container")
+    return cv2.VideoWriter_fourcc(*'MJPG'), 'MJPG', 'avi'
+
+
+def main(capture_source):
     # Filter OpenCV warnings about codec fallbacks
     warnings.filterwarnings("ignore", category=UserWarning)
 
-    # One or two cameras
-    n = len(capture_sources)
     seed = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
     print(f"{Fore.CYAN}[INFO] Run seed: {seed}")
 
     output_dir = "eye_captures"
 
-    # ——— clear out any old captures ———
+    # Clear out any old captures
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
-    # Initialize separate timestamp files for each camera
+    # Initialize timestamp files for both eyes
+    eyes = ['l', 'r']
     timestamp_files = []
-    for i in range(n):
-        timestamp_file = os.path.join(output_dir, f"{seed}_{eyes[i]}_timestamps.txt")
+    for eye in eyes:
+        timestamp_file = os.path.join(output_dir, f"{seed}_{eye}_timestamps.txt")
         with open(timestamp_file, 'w') as f:
             f.write("# Format: <frame_number> <prompt_text>\n")
             f.write("# Recorded on: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
             f.write("# Seed: " + seed + "\n\n")
         timestamp_files.append(timestamp_file)
 
-    # Prepare threads and queues
-    cancel_events = []
-    status_queues = []
-    output_queues = []
-    threads = []
+    # Prepare thread and queues for split camera
+    cancel_event = threading.Event()
+    status_queue = queue.Queue()
+    left_output_queue = queue.Queue(maxsize=2)
+    right_output_queue = queue.Queue(maxsize=2)
 
-    for i in range(n):
-        ce = threading.Event()
-        cancel_events.append(ce)
-        sq = queue.Queue()
-        oq = queue.Queue(maxsize=1)
-        status_queues.append(sq)
-        output_queues.append(oq)
+    # Create split UVC camera
+    if is_serial_capture_source(capture_source):
+        print(f"{Fore.RED}[ERROR] Serial cameras are not supported for split mode. Use a UVC camera.")
+        return
 
-        # Create appropriate camera type based on source
-        if is_serial_capture_source(capture_sources[i]):
-            print(f"{Fore.CYAN}[INFO] Using serial camera for source: {capture_sources[i]}")
-            cam = SerialCamera(capture_sources[i], ce, None, sq, oq)
-        else:
-            print(f"{Fore.CYAN}[INFO] Using CV2 camera for source: {capture_sources[i]}")
-            cam = CV2Camera(capture_sources[i], ce, None, sq, oq)
+    print(f"{Fore.CYAN}[INFO] Using split UVC camera for source: {capture_source}")
+    cam = SplitUVCCamera(capture_source, cancel_event, status_queue, left_output_queue, right_output_queue)
 
-        th = threading.Thread(target=cam.run)
-        threads.append(th)
-        th.start()
+    # Start camera thread
+    camera_thread = threading.Thread(target=cam.run)
+    camera_thread.start()
 
     # Warm-up and get first frames
-    first_frames = [None] * n
+    first_frames = [None, None]  # [left, right]
+    output_queues = [left_output_queue, right_output_queue]
     timeout = 10
-    for i in range(n):
+
+    for i, eye in enumerate(eyes):
         start = time.time()
-        print(f"{Fore.YELLOW}Waiting for camera '{eyes[i]}' to warm up...")
+        print(f"{Fore.YELLOW}Waiting for {eye} eye camera to warm up...")
         while first_frames[i] is None and time.time() - start < timeout:
-            while not status_queues[i].empty():
-                t, msg = status_queues[i].get()
+            while not status_queue.empty():
+                t, msg = status_queue.get()
                 print(f"{Fore.YELLOW}[{t}] {msg}")
             try:
                 if not output_queues[i].empty():
@@ -469,48 +600,23 @@ def main(capture_sources, eyes):
             except queue.Empty:
                 time.sleep(0.1)
         if first_frames[i] is None:
-            print(f"{Fore.RED}Failed to init camera '{eyes[i]}'. Exiting.")
-            for ev in cancel_events:
-                ev.set()
-            for th in threads:
-                th.join()
+            print(f"{Fore.RED}Failed to init {eye} eye camera. Exiting.")
+            cancel_event.set()
+            camera_thread.join()
             return
-        print(f"{Fore.GREEN}Camera '{eyes[i]}' initialized.")
+        print(f"{Fore.GREEN}{eye.upper()} eye camera initialized.")
 
     # Determine the best codec and container format for the current platform
     fourcc, codec_name, container_format = get_best_codec()
 
-    # Setup video writers using original frame dimensions
+    # Setup video writers for both eyes
     video_writers = []
-    for i in range(n):
+    for i, eye in enumerate(eyes):
         h, w = first_frames[i].shape[:2]
-        fn = os.path.join(output_dir, f"{seed}_full_session_{eyes[i]}.{container_format}")
-
-        # Create video writer with original frame dimensions
-        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h), False)
+        fn = os.path.join(output_dir, f"{seed}_full_session_{eye}.{container_format}")
+        # Use original dimensions, no compression
+        vw = cv2.VideoWriter(fn, fourcc, 30, (w, h), False)  # 30 FPS, original size, grayscale
         video_writers.append(vw)
-
-    prompts_old_unused = [
-        "Look left", "Look left and squint", "Look left and half blink", "Look right", "Look right and squint",
-        "Look right and half blink",
-        "Look up", "Look up and squint", "Look up and half blink", "Look down", "Look down and squint",
-        "Look down and half blink",
-        "Look top-left", "Look top-right", "Look bottom-left", "Look bottom-right",
-        "Look straight", "Look straight and squint", "Look straight and half blink",
-        "Close your eyes", "Squeeze your eyes closed",
-        "Widen your eyes and look in random direction",
-        "Raise eyebrows fully and look straight",
-        "Raise eyebrows halfway and look straight",
-        "Lower eyebrows fully and look straight",
-        "Lower eyebrows halfway and look straight",
-        "Raise eyebrows fully and look in random direction",
-        "Raise eyebrows halfway and look in random direction",
-        "Lower eyebrows fully and look in random direction",
-        "Lower eyebrows halfway and look in random direction",
-        "Do something random and look in random direction",
-        "Alternate between left and right quickly 2 times starting now",
-        "Look in a full circle starting now"
-    ]
 
     prompts = [
         "Look left", "Look left and squint", "Look right", "Look right and squint",
@@ -523,7 +629,11 @@ def main(capture_sources, eyes):
         "Raise eyebrows halfway and look forward",
         "Lower eyebrows fully and look forward",
         "Lower eyebrows halfway and look forward",
+        "Raise eyebrows fully and look in random direction",
+        "Lower eyebrows fully and look in random direction",
         "Close your eyes and look in random direction",
+        "Alternate between left and right quickly 2 times starting now",
+        "Look in a full circle starting now"
     ]
 
     try:
@@ -536,12 +646,16 @@ def main(capture_sources, eyes):
             # While speaking the prompt, continue capturing frames
             while not speech_done.is_set():
                 # Process camera frames while waiting for speech to complete
-                for j in range(n):
+                for j in range(2):  # 2 eyes
                     if not output_queues[j].empty():
-                        frame, frame_num, _ = output_queues[j].get()
-                        # Write frame directly without any compression or resizing
-                        video_writers[j].write(frame)
-                        cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                        try:
+                            frame, frame_num, fps = output_queues[j].get_nowait()
+                            # Write frame without compression
+                            video_writers[j].write(frame)
+                            cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                        except queue.Empty:
+                            pass
+
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     raise KeyboardInterrupt
                 time.sleep(0.01)  # Small sleep to prevent CPU hogging
@@ -555,46 +669,48 @@ def main(capture_sources, eyes):
 
                 t0 = time.time()
                 # Continue capturing frames during the 1-second countdown
-                # This combines the wait for speech and the 1-second timer
                 while (time.time() - t0 < 1.0) or not speech_done.is_set():
-                    for j in range(n):
+                    for j in range(2):  # 2 eyes
                         if not output_queues[j].empty():
-                            frame, frame_num, _ = output_queues[j].get()
-                            video_writers[j].write(frame)
-                            cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                            try:
+                                frame, frame_num, fps = output_queues[j].get_nowait()
+                                # Write frame without compression
+                                video_writers[j].write(frame)
+                                cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                            except queue.Empty:
+                                pass
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         raise KeyboardInterrupt
                     time.sleep(0.01)  # Small sleep to prevent CPU hogging
+
             print(f"{Fore.GREEN}Capturing now!")
 
             # Capture one prompt frame per eye (blocks up to 5 s)
-            prompt_frames = [None] * n
-            frame_numbers = [None] * n
-            for j in range(n):
+            prompt_frames = [None, None]
+            frame_numbers = [None, None]
+
+            for j in range(2):  # 2 eyes
                 try:
-                    frame, frame_num, _ = output_queues[j].get(timeout=5.0)
+                    frame, frame_num, fps = output_queues[j].get(timeout=5.0)
                     prompt_frames[j] = frame.copy()
                     frame_numbers[j] = frame_num  # Store the frame number
                     video_writers[j].write(frame)
                 except queue.Empty:
                     print(f"{Fore.RED}[WARNING] Could not capture frame for prompt '{prompt}' ({eyes[j]})")
 
-            # Record the timestamp (using the first camera's frame number if available)
-            timestamp_frame = next((frame_numbers[i] for i in range(n) if frame_numbers[i] is not None), None)
-            # Write timestamp for the specific eye
-
-            for j in range(n):
+            # Write timestamps for both eyes
+            for j in range(2):
                 if frame_numbers[j] is not None:
                     with open(timestamp_files[j], 'a') as f:
                         f.write(f"{frame_numbers[j]} #{prompt}#\n")
                     print(f"{Fore.CYAN}[TIMESTAMP] {eyes[j].upper()} - Frame {frame_numbers[j]}: {prompt}")
 
-            # Save images without compression (using PNG for lossless format)
+            # Save images without compression
             clean = prompt.lower().replace(' ', '_')
-            for j in range(n):
+            for j in range(2):
                 if prompt_frames[j] is not None:
                     img_fn = os.path.join(output_dir, f"{seed}_{eyes[j]}_{idx + 1:02d}_{clean}.png")
-                    # Save images without compression using PNG format
+                    # Save images without compression as PNG
                     cv2.imwrite(img_fn, prompt_frames[j])
                     print(f"{Fore.GREEN}[INFO] Saved {eyes[j]} frame: {img_fn}")
                 else:
@@ -604,15 +720,18 @@ def main(capture_sources, eyes):
             speech_done = speak("captured")
             while not speech_done.is_set():
                 # Process camera frames while waiting for speech to complete
-                for j in range(n):
+                for j in range(2):  # 2 eyes
                     if not output_queues[j].empty():
-                        frame, frame_num, _ = output_queues[j].get()
-                        video_writers[j].write(frame)
-                        cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                        try:
+                            frame, frame_num, fps = output_queues[j].get_nowait()
+                            # Write frame without compression
+                            video_writers[j].write(frame)
+                            cv2.imshow(f'Camera {eyes[j].upper()}', frame)
+                        except queue.Empty:
+                            pass
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     raise KeyboardInterrupt
                 time.sleep(0.01)  # Small sleep to prevent CPU hogging
-
 
     except KeyboardInterrupt:
         print(f"{Fore.YELLOW}[INFO] Interrupted by user.")
@@ -621,11 +740,10 @@ def main(capture_sources, eyes):
         print(f"{Fore.CYAN}Thank you for contributing <3")
         print(f"{Fore.CYAN}Files saved in '{output_dir}'")
 
-        # Clean up camera threads
-        for ev in cancel_events:
-            ev.set()
-        for th in threads:
-            th.join()
+        # Clean up camera thread
+        cancel_event.set()
+        camera_thread.join()
+
         for vw in video_writers:
             vw.release()
 
@@ -643,29 +761,31 @@ def main(capture_sources, eyes):
 
 
 if __name__ == "__main__":
-    src_input = input('Enter camera address(es) (e.g. 0 or 0,1 or COM5): ')
-    parts = [s.strip() for s in src_input.split(',') if s.strip()]
-    if len(parts) > 2:
-        print(f"{Fore.YELLOW}Only first two will be used.")
-        parts = parts[:2]
-    sources = []
-    for p in parts:
-        if p.isdigit() and not is_serial_capture_source(p):
-            sources.append(int(p))
-        elif is_serial_capture_source(p):
-            sources.append(p)
-        else:
-            if not (p.lower().startswith("http://") or p.lower().startswith("https://")):
-                p = "http://" + p
-            sources.append(p)
+    print(f"{Fore.CYAN}[INFO] Scanning for available cameras...")
+    available_cameras = list_available_cameras()
 
-    if len(sources) == 1:
-        eye = input('Enter "r" for right cam or "l" for left cam: ').lower()
-        if eye not in ['r', 'l']:
-            print(f"{Fore.RED}Invalid selection. Defaulting to 'r'")
-            eye = 'r'
-        eyes = [eye]
+    if not available_cameras:
+        print(f"{Fore.RED}[ERROR] No cameras detected. Please check:")
+        print(f"{Fore.YELLOW}1. Camera is properly connected")
+        print(f"{Fore.YELLOW}2. Camera drivers are installed")
+        print(f"{Fore.YELLOW}3. Camera is not being used by another application")
+        print(f"{Fore.YELLOW}4. Camera permissions are granted")
+        sys.exit(1)
+
+    print(f"{Fore.CYAN}[INFO] Available cameras: {available_cameras}")
+
+    src_input = input('Enter UVC camera address from the list above (e.g. 0 or 1): ')
+
+    # Convert to integer if numeric
+    if src_input.isdigit():
+        source = int(src_input)
+        if source not in available_cameras:
+            print(f"{Fore.YELLOW}[WARNING] Camera {source} was not detected as available, but trying anyway...")
     else:
-        eyes = ['l', 'r']
+        # Handle URL or other sources
+        if not (src_input.lower().startswith("http://") or src_input.lower().startswith("https://")):
+            src_input = "http://" + src_input
+        source = src_input
 
-    main(sources, eyes)
+    print(f"{Fore.CYAN}[INFO] Using single camera with split view for both eyes")
+    main(source)
