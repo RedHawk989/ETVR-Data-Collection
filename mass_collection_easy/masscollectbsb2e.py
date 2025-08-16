@@ -163,8 +163,6 @@ class SplitUVCCamera:
                 current_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 self.status_queue.put(("INFO", f"Camera resolution: {current_width}x{current_height}"))
 
-                # Try to set frame rate (optional)
-                self.cap.set(cv2.CAP_PROP_FPS, 30)  # Use 30 FPS as more cameras support this
 
             except Exception as e:
                 self.status_queue.put(("WARNING", f"Could not set camera properties: {str(e)}"))
@@ -615,7 +613,7 @@ def main(capture_source):
         h, w = first_frames[i].shape[:2]
         fn = os.path.join(output_dir, f"{seed}_full_session_{eye}.{container_format}")
         # Use original dimensions, no compression
-        vw = cv2.VideoWriter(fn, fourcc, 30, (w, h), False)  # 30 FPS, original size, grayscale
+        vw = cv2.VideoWriter(fn, fourcc, 60, (w, h), False)  # 30 FPS, original size, grayscale
         video_writers.append(vw)
 
     prompts = [
