@@ -5,7 +5,7 @@ set "ROOT=%SCRIPT_DIR%.."
 cd /d "%ROOT%"
 set "VENV=%ROOT%\.venv"
 
-call "%SCRIPT_DIR%_ensure_masscollect_venv.bat" build
+call "%SCRIPT_DIR%_ensure_venv.bat" build
 if errorlevel 1 exit /b 1
 
 call "%VENV%\Scripts\activate.bat"
