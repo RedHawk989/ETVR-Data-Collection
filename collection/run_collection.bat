@@ -11,3 +11,4 @@ call "%VENV%\Scripts\activate.bat"
 echo Running masscollect...
 python "%SCRIPT_DIR%masscollect.py"
 exit /b %ERRORLEVEL%
+

@@ -49,6 +49,41 @@ def speak(text):
     return done_event
 
 
+def _run_tts_command(command, timeout, stdin_text=None):
+    if shutil.which(command[0]) is None:
+        return False
+
+    try:
+        if stdin_text is None:
+            result = subprocess.run(command, check=False, timeout=timeout)
+            return result.returncode == 0
+
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE)
+        try:
+            proc.communicate(input=stdin_text.encode("utf-8"), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return False
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def _speak_linux(text):
+    linux_tts_commands = (
+        ["spd-say", "--wait", text],
+        ["espeak-ng", text],
+        ["espeak", text],
+    )
+
+    for command in linux_tts_commands:
+        if _run_tts_command(command, timeout=20):
+            return
+
+    _run_tts_command(["festival", "--tts"], timeout=20, stdin_text=text)
+
+
 def _speak_platform_specific(text, done_event):
     try:
         with speech_lock:
@@ -62,14 +97,7 @@ def _speak_platform_specific(text, done_event):
                 )
                 subprocess.run(["powershell", "-Command", ps_cmd], check=False, timeout=20)
             elif system == "linux":
-                try:
-                    subprocess.run(["espeak", text], check=False, timeout=20)
-                except FileNotFoundError:
-                    try:
-                        proc = subprocess.Popen(["festival", "--tts"], stdin=subprocess.PIPE)
-                        proc.communicate(input=text.encode())
-                    except FileNotFoundError:
-                        pass
+                _speak_linux(text)
     except Exception:
         pass
     finally:
