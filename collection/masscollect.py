@@ -6,6 +6,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 import threading
 import queue
+import socket as _socket
+import struct
 import cv2
 import time
 import os
@@ -109,23 +111,86 @@ ETVR_HEADER = b"\xff\xa0"
 ETVR_HEADER_FRAME = b"\xff\xa1"
 ETVR_HEADER_LEN = 6
 
-PROMPTS = [
-    "Look left", "Look left and squint", "Look right", "Look right and squint",
-    "Look up", "Look up and squint", "Look down", "Look down and squint",
-    "Look top-left", "Look top-right", "Look bottom-left", "Look bottom-right",
-    "Look straight", "Look straight and squint", "Close your eyes",
-    "Squeeze your eyes shut",
-    "Widen your eyes and look straight", "Widen your eyes and look left",
-    "Widen your eyes and look right",
-    "Raise eyebrows fully and look forward",
-    "Raise eyebrows halfway and look forward",
-    "Lower eyebrows fully and look forward",
-    "Lower eyebrows halfway and look forward",
-    "Raise eyebrows fully and look in random direction",
-    "Lower eyebrows fully and look in random direction",
-    "Close your eyes and look in random direction",
-    "Look in a full circle starting now",
+# (dot_code, tts_text)
+# dot_code != None: directional prompt — skipped in overlay mode (replaced by passes)
+# dot_code is None: individual prompt — always run
+PROMPT_DATA = [
+    (1,    "Look left"),
+    (1,    "Look left and squint"),
+    (2,    "Look right"),
+    (2,    "Look right and squint"),
+    (3,    "Look up"),
+    (3,    "Look up and squint"),
+    (4,    "Look down"),
+    (4,    "Look down and squint"),
+    (6,    "Look top-left"),
+    (5,    "Look top-right"),
+    (8,    "Look bottom-left"),
+    (7,    "Look bottom-right"),
+    (0,    "Look straight"),
+    (0,    "Look straight and squint"),
+    (None, "Close your eyes"),
+    (None, "Squeeze your eyes shut"),
+    (0,    "Widen your eyes and look straight"),
+    (1,    "Widen your eyes and look left"),
+    (2,    "Widen your eyes and look right"),
+    (0,    "Raise eyebrows fully and look forward"),
+    (0,    "Raise eyebrows halfway and look forward"),
+    (0,    "Lower eyebrows fully and look forward"),
+    (0,    "Lower eyebrows halfway and look forward"),
+    (None, "Raise eyebrows fully and look in random direction"),
+    (None, "Lower eyebrows fully and look in random direction"),
+    (None, "Close your eyes and look in random direction"),
+    (None, "Look in a full circle starting now"),
 ]
+PROMPTS = [p[1] for p in PROMPT_DATA]
+
+# Overlay DC sweep passes (cmd_code, label_prefix, tts_announcement).
+# Each pass: Python speaks TTS once, sends cmd → C++ animates 9-point sweep,
+# sends signals 0–8 (capture-ready per point) then 19 (pass done).
+OVERLAY_PASSES = [
+    (100, "gaze",           "Follow the dot as it moves"),
+    (101, "squint",         "Squint and follow the dot"),
+    (102, "widen",          "Widen eyes and follow the dot"),
+    (103, "brows_up_full",  "Raise eyebrows fully and follow the dot"),
+    (104, "brows_up_half",  "Raise eyebrows halfway and follow the dot"),
+    (105, "brows_dn_full",  "Lower eyebrows fully and follow the dot"),
+    (106, "brows_dn_half",  "Lower eyebrows halfway and follow the dot"),
+]
+
+# Capture point names for DC phase signals 0-8 (matches DC_POS in C++)
+OVERLAY_POINT_NAMES = {
+    0: "center",    1: "left",       2: "right",
+    3: "up",        4: "down",
+    5: "upper_left", 6: "upper_right", 7: "lower_left", 8: "lower_right",
+}
+OVERLAY_PORT     = 2112  # overlay → Python (capture signals)
+OVERLAY_CMD_PORT = 2113  # Python → overlay (commands)
+
+
+def _default_overlay_exe():
+    if getattr(sys, "frozen", False):
+        base_dir = sys._MEIPASS
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # First: overlay/ subfolder next to masscollect (frozen or dev with copied files)
+    bundled = os.path.join(base_dir, "overlay", "EyeTrackVR-Overlay.exe")
+    if os.path.isfile(bundled):
+        return bundled
+
+    # Second (dev only): sibling repo build output
+    if not getattr(sys, "frozen", False):
+        github_dir = os.path.dirname(os.path.dirname(base_dir))
+        sibling = os.path.join(github_dir, "EyeTrackVR-OpenVR-Calibration-Overlay",
+                               "build", "Release", "EyeTrackVR-Overlay.exe")
+        if os.path.isfile(sibling):
+            return sibling
+
+    return bundled  # return expected path even if not present yet
+
+
+OVERLAY_EXE_DEFAULT = _default_overlay_exe()
 
 
 class CameraState(Enum):
@@ -539,8 +604,10 @@ class CollectionApp:
             sv_ttk.set_theme("dark")
 
         self.mode_var = tk.StringVar(value="esp")
+        self.overlay_var = tk.BooleanVar(value=True)
         self.src1_var = tk.StringVar(value="")
         self.src2_var = tk.StringVar(value="")
+        self.overlay_exe_var = tk.StringVar(value=OVERLAY_EXE_DEFAULT)
 
         self.cancel_events: list = []
         self.output_queues: list = []
@@ -602,8 +669,25 @@ class CollectionApp:
             command=self._on_mode_change,
         ).pack(anchor="w")
 
-        cam_lf = ttk.LabelFrame(parent, text="Camera Settings", padding=8)
-        cam_lf.pack(fill="x", pady=(0, 8))
+        overlay_cb_frame = ttk.Frame(parent)
+        overlay_cb_frame.pack(fill="x", pady=(0, 8))
+        self._overlay_cb_frame = overlay_cb_frame
+        ttk.Checkbutton(
+            overlay_cb_frame, text="Use VR Overlay",
+            variable=self.overlay_var,
+            command=self._on_overlay_toggle,
+        ).pack(anchor="w")
+
+        self._cam_lf = ttk.LabelFrame(parent, text="Camera Settings", padding=8)
+        self._cam_lf.pack(fill="x", pady=(0, 8))
+        cam_lf = self._cam_lf
+
+        self._overlay_lf = ttk.LabelFrame(parent, text="Overlay Settings", padding=8)
+        ttk.Label(self._overlay_lf, text="Overlay Executable:").pack(anchor="w")
+        ttk.Entry(self._overlay_lf, textvariable=self.overlay_exe_var).pack(
+            fill="x", pady=(2, 0)
+        )
+        self._overlay_lf.pack(fill="x", pady=(0, 8))  # visible by default
 
         self._src1_lbl = ttk.Label(cam_lf, text="Left (UVC / COM port / URL):")
         self._src1_lbl.pack(anchor="w")
@@ -735,13 +819,13 @@ class CollectionApp:
             return None
 
     def _on_mode_change(self):
-        is_esp = self.mode_var.get() == "esp"
-        self.root.title(WINDOW_TITLE_ETVR if is_esp else WINDOW_TITLE_HEADSET)
+        mode = self.mode_var.get()
+        self.root.title(WINDOW_TITLE_ETVR if mode == "esp" else WINDOW_TITLE_HEADSET)
 
         self._src2_lbl.pack_forget()
         self._src2_entry.pack_forget()
 
-        if is_esp:
+        if mode == "esp":
             self._src1_lbl.configure(text="Left (UVC / COM port / URL):")
             self._src2_lbl.configure(text="Right (UVC / COM port / URL):")
             self._src2_lbl.pack(anchor="w", before=self._cam_btn_row)
@@ -750,6 +834,12 @@ class CollectionApp:
         else:
             self._src1_lbl.configure(text="Source (UVC Index):")
             self._src2_entry.configure(state="disabled")
+
+    def _on_overlay_toggle(self):
+        if self.overlay_var.get():
+            self._overlay_lf.pack(fill="x", pady=(0, 8), after=self._cam_lf)
+        else:
+            self._overlay_lf.pack_forget()
 
     def _parse_source(self, s: str):
         s = s.strip()
@@ -890,6 +980,8 @@ class CollectionApp:
         self.session_cancel.set()
 
     def _run_session(self):
+        use_overlay = self.overlay_var.get()
+
         for i in range(5, 0, -1):
             if self.session_cancel.is_set():
                 self.gui_queue.put(("countdown", ""))
@@ -958,16 +1050,81 @@ class CollectionApp:
                     except queue.Empty:
                         break
 
+        # Overlay setup
+        overlay_proc = None
+        udp_sock = None
+        cmd_sock = None
+        send_cmd = None
+
+        if use_overlay:
+            overlay_exe = self.overlay_exe_var.get().strip()
+            if not os.path.isfile(overlay_exe):
+                self.gui_queue.put(("status", f"Overlay exe not found: {overlay_exe} — running without overlay."))
+                use_overlay = False
+            else:
+                try:
+                    udp_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                    udp_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                    udp_sock.bind(("127.0.0.1", OVERLAY_PORT))
+                    udp_sock.settimeout(1.0)
+
+                    cmd_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+
+                    def send_cmd(val, _sock=cmd_sock):
+                        _sock.sendto(struct.pack(">i", val), ("127.0.0.1", OVERLAY_CMD_PORT))
+
+                    def send_text(text, _sock=cmd_sock):
+                        encoded = text.encode("utf-8")
+                        _sock.sendto(struct.pack(">i", 50) + encoded, ("127.0.0.1", OVERLAY_CMD_PORT))
+
+                    overlay_proc = subprocess.Popen(
+                        [overlay_exe, "interactive"],
+                        cwd=os.path.dirname(overlay_exe),
+                    )
+
+                    self.gui_queue.put(("status", "Waiting for overlay…"))
+                    ready = False
+                    ov_deadline = time.time() + 15
+                    while time.time() < ov_deadline and not self.session_cancel.is_set():
+                        drain_to_video()
+                        try:
+                            data, _ = udp_sock.recvfrom(16)
+                            val, = struct.unpack(">i", data[:4])
+                            if val == 255:
+                                ready = True
+                                break
+                        except _socket.timeout:
+                            pass
+
+                    if not ready:
+                        self.gui_queue.put(("status", "Overlay did not respond — running without overlay."))
+                        use_overlay = False
+                    else:
+                        self.gui_queue.put(("status", "Overlay ready."))
+                except OSError as e:
+                    self.gui_queue.put(("status", f"Overlay setup failed: {e} — running without overlay."))
+                    use_overlay = False
+
+        capture_count = 0
+        prompts_to_run = [
+            (dot_code, tts_text)
+            for dot_code, tts_text in PROMPT_DATA
+            if not (use_overlay and dot_code is not None)
+        ]
+        total_prompts = len(prompts_to_run)
+
         try:
-            for idx, prompt in enumerate(PROMPTS):
+            for capture_count, (dot_code, tts_text) in enumerate(prompts_to_run):
                 if self.session_cancel.is_set():
                     break
 
-                self.gui_queue.put(("prompt", prompt))
-                self.gui_queue.put(("progress", f"Prompt {idx + 1} / {len(PROMPTS)}"))
+                self.gui_queue.put(("prompt", tts_text))
+                self.gui_queue.put(("progress", f"Prompt {capture_count + 1} / {total_prompts}"))
                 self.gui_queue.put(("status", "Speaking…"))
 
-                speech_done = speak(prompt)
+                if use_overlay:
+                    send_text(tts_text)
+                speech_done = speak(tts_text)
                 while not speech_done.is_set():
                     if self.session_cancel.is_set():
                         break
@@ -1003,17 +1160,19 @@ class CollectionApp:
                 for j in range(n):
                     if frame_numbers[j] is not None:
                         with open(timestamp_files[j], "a") as f:
-                            f.write(f"{frame_numbers[j]} #{prompt}#\n")
+                            f.write(f"{frame_numbers[j]} #{tts_text}#\n")
 
-                clean = prompt.lower().replace(" ", "_")
+                clean = tts_text.lower().replace(" ", "_")
                 for j in range(n):
                     if prompt_frames[j] is not None:
                         img_fn = os.path.join(
                             output_dir,
-                            f"{seed}_{self.eyes[j]}_{idx + 1:02d}_{clean}.png",
+                            f"{seed}_{self.eyes[j]}_{capture_count + 1:02d}_{clean}.png",
                         )
                         cv2.imwrite(img_fn, prompt_frames[j])
 
+                if use_overlay:
+                    send_cmd(98)  # hide text overlay before next prompt
                 speech_done = speak("captured")
                 while not speech_done.is_set():
                     if self.session_cancel.is_set():
@@ -1021,7 +1180,31 @@ class CollectionApp:
                     drain_to_video()
                     time.sleep(0.01)
 
+            base_idx = capture_count + 1 if prompts_to_run else 0
+            if use_overlay and not self.session_cancel.is_set():
+                self._run_overlay_passes(
+                    seed, output_dir, n, oqs, video_writers,
+                    timestamp_files, drain_to_video, base_idx,
+                    udp_sock, send_cmd,
+                )
+
         finally:
+            if send_cmd is not None and cmd_sock is not None:
+                try:
+                    send_cmd(200)  # tell overlay to exit
+                except Exception:
+                    pass
+            if cmd_sock is not None:
+                cmd_sock.close()
+            if udp_sock is not None:
+                udp_sock.close()
+            if overlay_proc is not None and overlay_proc.poll() is None:
+                overlay_proc.terminate()
+                try:
+                    overlay_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    overlay_proc.kill()
+
             for vw in video_writers:
                 vw.release()
 
@@ -1036,6 +1219,81 @@ class CollectionApp:
             self.gui_queue.put(("progress", ""))
             self.gui_queue.put(("countdown", ""))
             self.gui_queue.put(("session_done", None))
+
+    def _do_overlay_capture(self, seed, output_dir, n, oqs, video_writers,
+                             timestamp_files, label, idx):
+        frames = [None] * n
+        frame_nums = [None] * n
+        for j in range(n):
+            try:
+                frame, fnum, _ = oqs[j].get(timeout=5.0)
+                frames[j] = frame.copy()
+                frame_nums[j] = fnum
+                video_writers[j].write(frame)
+                self.preview_frames[j] = frame
+            except queue.Empty:
+                pass
+
+        for j in range(n):
+            if frame_nums[j] is not None:
+                with open(timestamp_files[j], "a") as f:
+                    f.write(f"{frame_nums[j]} #{label}#\n")
+
+        for j in range(n):
+            if frames[j] is not None:
+                img_fn = os.path.join(
+                    output_dir,
+                    f"{seed}_{self.eyes[j]}_{idx + 1:02d}_{label}.png",
+                )
+                cv2.imwrite(img_fn, frames[j])
+
+    def _run_overlay_passes(self, seed, output_dir, n, oqs, video_writers,
+                            timestamp_files, drain_to_video, base_idx,
+                            udp_sock, send_cmd):
+        overlay_idx = base_idx
+        total_passes = len(OVERLAY_PASSES)
+
+        for pass_num, (cmd, label_prefix, tts_text) in enumerate(OVERLAY_PASSES):
+            if self.session_cancel.is_set():
+                break
+
+            self.gui_queue.put(("prompt", tts_text))
+            self.gui_queue.put(("progress", f"Pass {pass_num + 1}/{total_passes}: announcing"))
+            self.gui_queue.put(("status", "Speaking…"))
+
+            done = speak(tts_text)
+            while not done.is_set():
+                if self.session_cancel.is_set():
+                    return
+                drain_to_video()
+                time.sleep(0.01)
+
+            send_cmd(cmd)
+            self.gui_queue.put(("status", f"Pass {pass_num + 1}/{total_passes} — {label_prefix}"))
+
+            while not self.session_cancel.is_set():
+                drain_to_video()
+                try:
+                    data, _ = udp_sock.recvfrom(16)
+                except _socket.timeout:
+                    continue
+                if len(data) < 4:
+                    continue
+
+                value, = struct.unpack(">i", data[:4])
+
+                if value == 19:
+                    break  # pass done
+                elif 0 <= value <= 8:
+                    point_name = OVERLAY_POINT_NAMES[value]
+                    label = f"{label_prefix}_{point_name}"
+                    self.gui_queue.put(("progress", f"Pass {pass_num + 1}/{total_passes}: {value + 1}/9"))
+                    self._do_overlay_capture(seed, output_dir, n, oqs, video_writers,
+                                              timestamp_files, label, overlay_idx)
+                    overlay_idx += 1
+
+        if not self.session_cancel.is_set():
+            self.gui_queue.put(("status", "Overlay passes complete."))
 
     def _poll_gui_queue(self):
         for sq in self.status_queues:

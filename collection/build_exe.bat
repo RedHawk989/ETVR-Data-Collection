@@ -5,26 +5,14 @@ set "ROOT=%SCRIPT_DIR%.."
 cd /d "%ROOT%"
 set "VENV=%ROOT%\.venv"
 
+REM Strip trailing backslash for args where a trailing \" would escape the closing quote
+set "SCRIPT_DIR_NS=%SCRIPT_DIR:~0,-1%"
+
 call "%SCRIPT_DIR%_ensure_venv.bat" build
 if errorlevel 1 exit /b 1
 
-call "%VENV%\Scripts\activate.bat"
-
-echo Building masscollect.exe ^(single file^)...
-python -m PyInstaller ^
-    --onefile ^
-    --console ^
-    --name masscollect ^
-    --clean ^
-    --noconfirm ^
-    --distpath "%SCRIPT_DIR%dist" ^
-    --workpath "%SCRIPT_DIR%build" ^
-    --specpath "%SCRIPT_DIR%" ^
-    --hidden-import=cv2 ^
-    --hidden-import=numpy ^
-    --hidden-import=colorama ^
-    --hidden-import=serial.tools.list_ports ^
-    "%SCRIPT_DIR%masscollect.py"
+echo Building masscollect.exe (single file, overlay bundled)...
+"%VENV%\Scripts\pyinstaller.exe" --clean --noconfirm --distpath "%SCRIPT_DIR_NS%\dist" --workpath "%SCRIPT_DIR_NS%\build" "%SCRIPT_DIR%masscollect.spec"
 
 if errorlevel 1 (
     echo Build failed.
@@ -32,6 +20,6 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done: %SCRIPT_DIR%dist\masscollect.exe
+echo Done: %SCRIPT_DIR%dist\masscollect.exe (overlay bundled inside)
 endlocal
 exit /b 0

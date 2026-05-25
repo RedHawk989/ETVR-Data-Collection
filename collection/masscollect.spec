@@ -5,7 +5,11 @@ a = Analysis(
     ['C:\\Users\\beaul\\Documents\\GitHub\\ETVR-Data-Collection\\collection\\masscollect.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('overlay\\EyeTrackVR-Overlay.exe', 'overlay'),
+        ('overlay\\openvr_api.dll', 'overlay'),
+        ('overlay\\assets\\Purple_Dot.png', 'overlay/assets'),
+    ],
     hiddenimports=['cv2', 'numpy', 'colorama', 'serial.tools.list_ports'],
     hookspath=[],
     hooksconfig={},
