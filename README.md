@@ -1,3 +1,5 @@
+# This repo is archived as main collection functionality is merged into the main app.
+
 # ETVR-Data-Collection
 
 Tools for collecting and annotating eye tracking data for the LEAPv2 tracking model.
